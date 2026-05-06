@@ -42,12 +42,17 @@ class NewRequestData:
     # Only used for v2 model runner.
     prefill_token_ids: list[int] | None = None
 
+    # DAG-RoPE: absolute position offset for this node's first token.
+    # None means standard sequential position assignment.
+    dag_position_offset: int | None = None
+
     @classmethod
     def from_request(
         cls,
         request: Request,
         block_ids: tuple[list[int], ...],
         prefill_token_ids: list[int] | None = None,
+        dag_position_offset: int | None = None,
     ) -> "NewRequestData":
         return cls(
             req_id=request.request_id,
@@ -60,6 +65,7 @@ class NewRequestData:
             lora_request=request.lora_request,
             prompt_embeds=request.prompt_embeds,
             prefill_token_ids=prefill_token_ids,
+            dag_position_offset=dag_position_offset,
         )
 
     def __repr__(self) -> str:

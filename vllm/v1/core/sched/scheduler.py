@@ -886,13 +886,16 @@ class Scheduler(SchedulerInterface):
                     req,
                     req_to_new_blocks[req.request_id].get_block_ids(),
                     req._all_token_ids,
+                    dag_position_offset=req.dag_position_offset,
                 )
                 for req in scheduled_new_reqs
             ]
         else:
             new_reqs_data = [
                 NewRequestData.from_request(
-                    req, req_to_new_blocks[req.request_id].get_block_ids()
+                    req,
+                    req_to_new_blocks[req.request_id].get_block_ids(),
+                    dag_position_offset=req.dag_position_offset,
                 )
                 for req in scheduled_new_reqs
             ]

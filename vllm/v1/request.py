@@ -95,6 +95,9 @@ class Request:
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: dict[str, Any] | None = None
 
+        # DAG-RoPE: absolute RoPE position offset for this node's first token.
+        self.dag_position_offset: int | None = None
+
         if pooling_params is not None:
             # Pooling models.
             self.max_tokens = 1
@@ -109,6 +112,9 @@ class Request:
                 self.kv_transfer_params = sampling_params.extra_args.get(
                     "kv_transfer_params"
                 )
+                offset = sampling_params.extra_args.get("dag_position_offset")
+                if offset is not None:
+                    self.dag_position_offset = int(offset)
         else:
             raise ValueError("sampling_params and pooling_params can't both be unset")
 

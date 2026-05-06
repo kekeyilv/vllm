@@ -43,6 +43,11 @@ class CachedRequestState:
 
     xdrope_positions: torch.Tensor | None = None
 
+    # DAG-RoPE: absolute position offset for this node's first token.
+    # When set, positions = dag_position_offset + num_computed_tokens + query_idx
+    # instead of the default num_computed_tokens + query_idx.
+    dag_position_offset: int | None = None
+
     lora_request: LoRARequest | None = None
     prompt_embeds: torch.Tensor | None = None
 

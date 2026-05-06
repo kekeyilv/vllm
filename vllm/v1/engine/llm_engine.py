@@ -4,7 +4,10 @@
 import time
 from collections.abc import Callable, Mapping
 from copy import copy
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from vllm.v1.dag.topology import DAGTopology
 
 import torch.nn as nn
 from typing_extensions import TypeVar
@@ -175,6 +178,96 @@ class LLMEngine:
             stat_loggers=stat_loggers,
             multiprocess_mode=enable_multiprocessing,
         )
+
+    def generate_dag(
+        self,
+        dag: "DAGTopology",
+        sampling_params: SamplingParams,
+    ) -> "dict[str, RequestOutput]":
+        """Generate outputs for all nodes in a DAG-structured agent workflow.
+
+        Nodes are processed in topological order.  Parallel branches receive the
+        same RoPE start offset, enabling zero-prefill KV-cache reuse at merge
+        points via DAG-RoPE position assignment.
+
+        Args:
+            dag: The DAG topology describing the agent workflow.
+            sampling_params: SamplingParams applied to every node.
+
+        Returns:
+            A dict mapping node_id -> RequestOutput for each node.
+
+        Note:
+            Block-ID retrieval (for merge-node KV reuse) requires single-process
+            mode (VLLM_ENABLE_V1_MULTIPROCESSING=0).  In multiprocess mode the
+            call succeeds but inherited blocks are not forwarded to merge nodes.
+        """
+        from vllm.v1.dag import DAGSession, DAGTopology  # noqa: F401
+
+        session = DAGSession(dag)
+        results: dict[str, RequestOutput] = {}
+
+        # Access the in-process scheduler for block-ID retrieval when available.
+        _scheduler = None
+        try:
+            _scheduler = self.engine_core.engine_core.scheduler  # type: ignore[attr-defined]
+        except AttributeError:
+            pass  # multiprocess mode — block_ids retrieval not available
+
+        for node_id in dag.topo_sort():
+            node = dag.get_node(node_id)
+            position_offset = session.compute_offset(node_id)
+
+            # Inject DAG offset via extra_args so it flows through the
+            # standard request pipeline without touching EngineCoreRequest.
+            import copy
+            node_params = copy.copy(sampling_params)
+            extra = dict(node_params.extra_args) if node_params.extra_args else {}
+            extra["dag_position_offset"] = position_offset
+            node_params.extra_args = extra
+
+            req_id = f"dag__{node_id}"
+            self.add_request(
+                request_id=req_id,
+                prompt=node.prompt,
+                params=node_params,
+            )
+
+            # Drive the step loop until this request finishes.
+            node_output: RequestOutput | None = None
+            while node_output is None:
+                outputs = self.step()
+                for out in outputs:
+                    if out.request_id == req_id and out.finished:
+                        node_output = out
+                        break
+
+            results[node_id] = node_output
+
+            # Retrieve block IDs for downstream KV reuse.
+            block_ids_for_session: list[list[int]] = [[]]
+            if _scheduler is not None:
+                try:
+                    raw = _scheduler.kv_cache_manager.get_block_ids(req_id)
+                    block_ids_for_session = [list(g) for g in raw]
+                except Exception:
+                    pass
+
+            num_tokens = (
+                len(node_output.outputs[0].token_ids)
+                + (
+                    len(node.prompt.split())  # rough token count if tokenizer absent
+                    if node_output.prompt_token_ids is None
+                    else len(node_output.prompt_token_ids)
+                )
+            )
+            session.register_completion(
+                node_id=node_id,
+                num_tokens=num_tokens,
+                block_ids=block_ids_for_session,
+            )
+
+        return results
 
     def get_num_unfinished_requests(self) -> int:
         return self.output_processor.get_num_unfinished_requests()

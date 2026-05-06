@@ -939,9 +939,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             computed_prefill, self.req_states.prefill_len.np, out=computed_prefill
         )
         # Advance the CPU mirror optimistically (assume all scheduled accepted).
-        self.req_states.num_computed_tokens_np[idx_mapping_np] += (
-            input_batch.num_scheduled_tokens
-        )
+        self.req_states.num_computed_tokens_np[
+            idx_mapping_np
+        ] += input_batch.num_scheduled_tokens
 
     @torch.inference_mode()
     def execute_model(
@@ -1313,9 +1313,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             computed_prefill, self.req_states.prefill_len.np, out=computed_prefill
         )
         # Advance the CPU mirror optimistically (assume all scheduled accepted).
-        self.req_states.num_computed_tokens_np[idx_mapping_np] += (
-            input_batch.num_scheduled_tokens
-        )
+        self.req_states.num_computed_tokens_np[
+            idx_mapping_np
+        ] += input_batch.num_scheduled_tokens
 
     ########### EPLB methods start ###########
     @property
