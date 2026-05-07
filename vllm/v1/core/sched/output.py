@@ -46,6 +46,9 @@ class NewRequestData:
     # None means standard sequential position assignment.
     dag_position_offset: int | None = None
 
+    # DAG-RoPE: number of inherited ancestor tokens for merge nodes.
+    dag_num_inherited_tokens: int = 0
+
     @classmethod
     def from_request(
         cls,
@@ -66,6 +69,7 @@ class NewRequestData:
             prompt_embeds=request.prompt_embeds,
             prefill_token_ids=prefill_token_ids,
             dag_position_offset=dag_position_offset,
+            dag_num_inherited_tokens=request.dag_num_inherited_tokens,
         )
 
     def __repr__(self) -> str:

@@ -183,7 +183,9 @@ class LLMEngine:
         self,
         dag: "DAGTopology",
         sampling_params: SamplingParams,
-    ) -> "dict[str, RequestOutput]":
+        return_timing: bool = False,
+        include_parent_context: bool = True,
+    ) -> "dict[str, RequestOutput] | tuple[dict[str, RequestOutput], dict[str, float]]":
         """Generate outputs for all nodes in a DAG-structured agent workflow.
 
         Nodes are processed in topological order.  Parallel branches receive the
@@ -191,60 +193,192 @@ class LLMEngine:
         points via DAG-RoPE position assignment.
 
         Args:
-            dag: The DAG topology describing the agent workflow.
-            sampling_params: SamplingParams applied to every node.
+            dag: The DAG topology.
+            sampling_params: Applied to every node.
+            return_timing: When True, also return per-node TTFT (ms) as a second
+                value.  TTFT = wall-clock from add_request() to first token in step().
+            include_parent_context: When True (default), prepend each parent's
+                output text to the child's prompt so the model has conversational
+                context even without full KV-inheritance.  Set to False for pure
+                TTFT measurement: each node only prefills its own short prompt,
+                matching the zero-prefill semantics DAG-RoPE provides via the
+                block table.
 
         Returns:
-            A dict mapping node_id -> RequestOutput for each node.
-
-        Note:
-            Block-ID retrieval (for merge-node KV reuse) requires single-process
-            mode (VLLM_ENABLE_V1_MULTIPROCESSING=0).  In multiprocess mode the
-            call succeeds but inherited blocks are not forwarded to merge nodes.
+            results dict mapping node_id → RequestOutput.
+            If return_timing=True, also returns {node_id: ttft_ms}.
         """
-        from vllm.v1.dag import DAGSession, DAGTopology  # noqa: F401
+        import copy as _copy
+
+        from vllm.v1.dag import DAGSession
 
         session = DAGSession(dag)
         results: dict[str, RequestOutput] = {}
+        per_node_ttft_ms: dict[str, float] = {}
+        node_text_outputs: dict[str, str] = {}
 
-        # Access the in-process scheduler for block-ID retrieval when available.
         _scheduler = None
         try:
             _scheduler = self.engine_core.engine_core.scheduler  # type: ignore[attr-defined]
         except AttributeError:
-            pass  # multiprocess mode — block_ids retrieval not available
+            pass
+
+        # Pre-tokenize each node's own prompt to compute tail-alignment deltas.
+        tokenizer = self.renderer.tokenizer
+        node_own_token_counts: dict[str, int] = {}
+        for nid in dag.topo_sort():
+            raw_prompt = dag.get_node(nid).prompt
+            try:
+                node_own_token_counts[nid] = len(
+                    tokenizer.encode(raw_prompt, add_special_tokens=False)
+                )
+            except Exception:
+                node_own_token_counts[nid] = len(raw_prompt.split())
+
+        # For each branch node that feeds a merge node, compute the tail delta
+        # (positive shift so shorter branches align their last token with the
+        # longest branch).  Only used when include_parent_context=False.
+        tail_delta: dict[str, int] = {}
+        if not include_parent_context:
+            for nid in dag.topo_sort():
+                node = dag.get_node(nid)
+                if len(node.parents) > 1:
+                    # nid is a merge node; compute per-parent expected lengths.
+                    expected: dict[str, int] = {
+                        pid: node_own_token_counts[pid] + sampling_params.max_tokens
+                        for pid in node.parents
+                    }
+                    L_max = max(expected.values())
+                    for pid, L in expected.items():
+                        delta = L_max - L
+                        # Keep the larger delta if a node feeds multiple merges.
+                        if delta > tail_delta.get(pid, 0):
+                            tail_delta[pid] = delta
+
+        # Per-node pinned block IDs (pure DAG-RoPE mode only).
+        # Keeps ancestor KV blocks alive until a downstream merge node finishes.
+        pinned_by_node: dict[str, list[int]] = {}
+        # Track each node's own (unformatted) prompt for conversation history.
+        node_own_prompts: dict[str, str] = {}
+
+        # Helper: format a message list with the model's chat template.
+        # Falls back to newline-joined content if the tokenizer lacks one.
+        def _apply_template(messages: list[dict]) -> str:
+            try:
+                return tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            except Exception:
+                return "\n".join(m["content"] for m in messages if m.get("content"))
 
         for node_id in dag.topo_sort():
             node = dag.get_node(node_id)
-            position_offset = session.compute_offset(node_id)
+            node_own_prompts[node_id] = node.prompt
+            position_offset = session.compute_offset(node_id) + tail_delta.get(node_id, 0)
 
-            # Inject DAG offset via extra_args so it flows through the
-            # standard request pipeline without touching EngineCoreRequest.
-            import copy
-            node_params = copy.copy(sampling_params)
+            # Build effective prompt using proper chat-template roles.
+            #
+            # include_parent_context=True  → quality mode: build a multi-turn
+            #   conversation that lists all ancestors in topological order,
+            #   alternating user (node prompt) / assistant (node output) turns.
+            #   This correctly marks LLM outputs as assistant messages rather
+            #   than smuggling them into user turns.
+            #
+            # include_parent_context=False → pure DAG-RoPE mode: each node
+            #   sees only its own prompt; ancestor context is provided through
+            #   the inherited KV-cache block table, not repeated as text.
+            if include_parent_context and node.parents:
+                ancestors_ordered = [
+                    nid for nid in dag.topo_sort()
+                    if nid in session._ancestors_cache[node_id]
+                ]
+                messages: list[dict] = []
+                for anc_id in ancestors_ordered:
+                    if anc_id in node_own_prompts:
+                        messages.append({"role": "user",
+                                         "content": node_own_prompts[anc_id]})
+                    if anc_id in node_text_outputs:
+                        messages.append({"role": "assistant",
+                                         "content": node_text_outputs[anc_id]})
+                messages.append({"role": "user", "content": node.prompt})
+                effective_prompt = _apply_template(messages)
+            else:
+                effective_prompt = _apply_template(
+                    [{"role": "user", "content": node.prompt}]
+                )
+
+            node_params = _copy.copy(sampling_params)
             extra = dict(node_params.extra_args) if node_params.extra_args else {}
             extra["dag_position_offset"] = position_offset
+
+            # Prevent partial prefix-cache hits for nodes with a non-zero DAG
+            # position offset.
+            #
+            # Problem: with include_parent_context=True the effective prompt for
+            # branch B starts with the root A's formatted content, so vLLM finds
+            # a partial prefix-cache hit (N_A tokens, cached from A's run at
+            # positions [0, N_A-1]).  B's remaining tokens are then prefilled at
+            # positions N_A + q + dag_offset.  During that prefill B attends to
+            # the cached A-KV, whose keys encode positions [0, N_A-1] — but
+            # B's queries expect those keys at positions [dag_offset, dag_offset
+            # + N_A-1].  The relative-distance mismatch makes attention
+            # incoherent → the first-ever run of B/C/D produces "!!!".
+            #
+            # Fix: force a full re-prefill for every node that has a non-zero
+            # offset.  The correct KV (computed at the right DAG positions) is
+            # then cached and can be safely reused on future identical calls.
+            if position_offset != 0:
+                node_params.skip_reading_prefix_cache = True
+
+            # For merge nodes in pure DAG-RoPE mode, pass inherited block IDs.
+            # NOTE: we pass ONLY the block IDs, NOT a "num_inherited_tokens"
+            # count.  The scheduler will prepend these blocks to D's block
+            # table after normal slot allocation.  D's num_computed_tokens
+            # stays 0, so D re-prefills its own prompt in full — the inherited
+            # blocks merely extend the block table so D can attend to ancestor
+            # KV during that prefill.
+            if not include_parent_context and len(node.parents) > 1 and _scheduler is not None:
+                inherited = session.get_inherited_block_ids(node_id)
+                if inherited and inherited[0]:
+                    extra["dag_inherited_block_ids"] = inherited[0]
+
             node_params.extra_args = extra
 
             req_id = f"dag__{node_id}"
+            t_submit = time.time()
             self.add_request(
                 request_id=req_id,
-                prompt=node.prompt,
+                prompt=effective_prompt,
                 params=node_params,
             )
 
-            # Drive the step loop until this request finishes.
+            first_token_time: float | None = None
             node_output: RequestOutput | None = None
             while node_output is None:
-                outputs = self.step()
-                for out in outputs:
-                    if out.request_id == req_id and out.finished:
-                        node_output = out
-                        break
+                step_outputs = self.step()
+                for out in step_outputs:
+                    if out.request_id == req_id:
+                        if (
+                            first_token_time is None
+                            and out.outputs
+                            and out.outputs[0].token_ids
+                        ):
+                            first_token_time = time.time()
+                        if out.finished:
+                            node_output = out
+                            break
 
+            ttft_ms = (
+                (first_token_time - t_submit) * 1000.0
+                if first_token_time is not None
+                else 0.0
+            )
+            per_node_ttft_ms[node_id] = ttft_ms
             results[node_id] = node_output
+            node_text_outputs[node_id] = node_output.outputs[0].text
 
-            # Retrieve block IDs for downstream KV reuse.
             block_ids_for_session: list[list[int]] = [[]]
             if _scheduler is not None:
                 try:
@@ -253,20 +387,43 @@ class LLMEngine:
                 except Exception:
                     pass
 
-            num_tokens = (
-                len(node_output.outputs[0].token_ids)
-                + (
-                    len(node.prompt.split())  # rough token count if tokenizer absent
-                    if node_output.prompt_token_ids is None
-                    else len(node_output.prompt_token_ids)
-                )
+            prompt_token_count = (
+                len(node_output.prompt_token_ids)
+                if node_output.prompt_token_ids is not None
+                else len(effective_prompt.split())
             )
             session.register_completion(
                 node_id=node_id,
-                num_tokens=num_tokens,
+                num_tokens=prompt_token_count + len(node_output.outputs[0].token_ids),
                 block_ids=block_ids_for_session,
             )
 
+            if not include_parent_context and _scheduler is not None:
+                bp = _scheduler.kv_cache_manager.block_pool
+                if len(node.parents) > 1:
+                    # Merge node completed: unpin all ancestor blocks now that
+                    # D has finished and its KV blocks are in the block table.
+                    for anc_id in session._ancestors_cache[node_id]:
+                        for bid in pinned_by_node.pop(anc_id, []):
+                            bp.blocks[bid].ref_cnt -= 1
+                else:
+                    # Non-merge node: pin own blocks for downstream merge nodes.
+                    own_pins = []
+                    for bid in block_ids_for_session[0]:
+                        bp.blocks[bid].ref_cnt += 1
+                        own_pins.append(bid)
+                    pinned_by_node[node_id] = own_pins
+
+        # Release any remaining pins (leaf nodes with no downstream merge).
+        if not include_parent_context and _scheduler is not None:
+            bp = _scheduler.kv_cache_manager.block_pool
+            for bid_list in pinned_by_node.values():
+                for bid in bid_list:
+                    bp.blocks[bid].ref_cnt -= 1
+            pinned_by_node.clear()
+
+        if return_timing:
+            return results, per_node_ttft_ms
         return results
 
     def get_num_unfinished_requests(self) -> int:

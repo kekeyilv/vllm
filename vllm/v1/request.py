@@ -97,6 +97,9 @@ class Request:
 
         # DAG-RoPE: absolute RoPE position offset for this node's first token.
         self.dag_position_offset: int | None = None
+        # DAG-RoPE: inherited ancestor block IDs for merge nodes.
+        self.dag_inherited_block_ids: list[int] | None = None
+        self.dag_num_inherited_tokens: int = 0
 
         if pooling_params is not None:
             # Pooling models.
@@ -115,6 +118,12 @@ class Request:
                 offset = sampling_params.extra_args.get("dag_position_offset")
                 if offset is not None:
                     self.dag_position_offset = int(offset)
+                inherited = sampling_params.extra_args.get("dag_inherited_block_ids")
+                if inherited is not None:
+                    self.dag_inherited_block_ids = list(inherited)
+                inh_tokens = sampling_params.extra_args.get("dag_num_inherited_tokens")
+                if inh_tokens is not None:
+                    self.dag_num_inherited_tokens = int(inh_tokens)
         else:
             raise ValueError("sampling_params and pooling_params can't both be unset")
 

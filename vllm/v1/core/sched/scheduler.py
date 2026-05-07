@@ -608,7 +608,14 @@ class Scheduler(SchedulerInterface):
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
-                    # Get locally-cached tokens.
+                    # Normal prefix-cache lookup.  DAG block inheritance is
+                    # handled separately at NewRequestData assembly time: the
+                    # inherited ancestor blocks are prepended to block_ids there
+                    # so that the merge node can attend to them during its own
+                    # full prefill.  We must NOT count them as "pre-computed
+                    # tokens of D's own prompt" (which is what passing them as
+                    # new_computed_blocks / num_new_local_computed_tokens would
+                    # imply — that would incorrectly skip D's own prefill).
                     new_computed_blocks, num_new_local_computed_tokens = (
                         self.kv_cache_manager.get_computed_blocks(request)
                     )
@@ -878,13 +885,34 @@ class Scheduler(SchedulerInterface):
                 )
 
         # Construct the scheduler output.
+        #
+        # DAG block inheritance: for merge nodes with dag_inherited_block_ids,
+        # prepend the inherited ancestor block IDs to the front of the block
+        # table.  The scheduler allocated slots only for D's own prompt tokens
+        # (num_computed_tokens = 0, full prefill of D's prompt).  The inherited
+        # blocks sit ahead in the block table so that paged attention can see
+        # ancestor KV while computing D's own tokens — this is the zero-prefill
+        # property of DAG-RoPE (D attends to branches via the block table
+        # rather than re-reading their text).
+        def _with_dag_inherited(req, block_ids: tuple) -> tuple:
+            inherited = getattr(req, "dag_inherited_block_ids", None)
+            if not inherited:
+                return block_ids
+            # Prepend to group-0; replicate for any additional groups.
+            return (inherited + list(block_ids[0]),) + tuple(
+                inherited + list(g) for g in block_ids[1:]
+            )
+
         if self.use_v2_model_runner:
             scheduled_new_reqs = scheduled_new_reqs + scheduled_resumed_reqs
             scheduled_resumed_reqs = []
             new_reqs_data = [
                 NewRequestData.from_request(
                     req,
-                    req_to_new_blocks[req.request_id].get_block_ids(),
+                    _with_dag_inherited(
+                        req,
+                        req_to_new_blocks[req.request_id].get_block_ids(),
+                    ),
                     req._all_token_ids,
                     dag_position_offset=req.dag_position_offset,
                 )
@@ -894,7 +922,10 @@ class Scheduler(SchedulerInterface):
             new_reqs_data = [
                 NewRequestData.from_request(
                     req,
-                    req_to_new_blocks[req.request_id].get_block_ids(),
+                    _with_dag_inherited(
+                        req,
+                        req_to_new_blocks[req.request_id].get_block_ids(),
+                    ),
                     dag_position_offset=req.dag_position_offset,
                 )
                 for req in scheduled_new_reqs
