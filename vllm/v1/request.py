@@ -14,6 +14,7 @@ from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.v1.dag.context import DAGContext
 from vllm.v1.engine import (
     EngineCoreEvent,
     EngineCoreEventType,
@@ -63,6 +64,7 @@ class Request:
         prompt_token_ids: list[int] | None,
         sampling_params: SamplingParams | None,
         pooling_params: PoolingParams | None,
+        dag_context: DAGContext | None = None,
         client_index: int = 0,
         arrival_time: float | None = None,
         prompt_embeds: torch.Tensor | None = None,
@@ -95,11 +97,7 @@ class Request:
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: dict[str, Any] | None = None
 
-        # DAG-RoPE: absolute RoPE position offset for this node's first token.
-        self.dag_position_offset: int | None = None
-        # DAG-RoPE: inherited ancestor block IDs for merge nodes.
-        self.dag_inherited_block_ids: list[int] | None = None
-        self.dag_num_inherited_tokens: int = 0
+        self.dag_context = dag_context
 
         if pooling_params is not None:
             # Pooling models.
@@ -115,15 +113,6 @@ class Request:
                 self.kv_transfer_params = sampling_params.extra_args.get(
                     "kv_transfer_params"
                 )
-                offset = sampling_params.extra_args.get("dag_position_offset")
-                if offset is not None:
-                    self.dag_position_offset = int(offset)
-                inherited = sampling_params.extra_args.get("dag_inherited_block_ids")
-                if inherited is not None:
-                    self.dag_inherited_block_ids = list(inherited)
-                inh_tokens = sampling_params.extra_args.get("dag_num_inherited_tokens")
-                if inh_tokens is not None:
-                    self.dag_num_inherited_tokens = int(inh_tokens)
         else:
             raise ValueError("sampling_params and pooling_params can't both be unset")
 
@@ -210,6 +199,7 @@ class Request:
             block_hasher=block_hasher,
             resumable=request.resumable,
             reasoning_ended=request.reasoning_ended,
+            dag_context=request.dag_context,
         )
 
     def append_output_token_ids(

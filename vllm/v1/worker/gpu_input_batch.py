@@ -14,6 +14,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.collection_utils import swap_dict_values
+from vllm.v1.dag.context import DAGContext
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 from vllm.v1.sample.logits_processor import (
@@ -43,10 +44,7 @@ class CachedRequestState:
 
     xdrope_positions: torch.Tensor | None = None
 
-    # DAG-RoPE: absolute position offset for this node's first token.
-    # When set, positions = dag_position_offset + num_computed_tokens + query_idx
-    # instead of the default num_computed_tokens + query_idx.
-    dag_position_offset: int | None = None
+    dag_context: DAGContext | None = None
 
     lora_request: LoRARequest | None = None
     prompt_embeds: torch.Tensor | None = None
@@ -556,7 +554,10 @@ class InputBatch:
         i2_active_token_count = self._get_active_token_count(i2)
         max_active_token_count = max(i1_active_token_count, i2_active_token_count)
 
-        self._req_ids[i1], self._req_ids[i2] = self._req_ids[i2], self._req_ids[i1]  # noqa
+        self._req_ids[i1], self._req_ids[i2] = (
+            self._req_ids[i2],
+            self._req_ids[i1],
+        )  # noqa
         self.req_output_token_ids[i1], self.req_output_token_ids[i2] = (
             self.req_output_token_ids[i2],
             self.req_output_token_ids[i1],
@@ -715,7 +716,7 @@ class InputBatch:
 
             num_tokens = self._get_active_token_count(last_req_index)
 
-            (self.spec_token_ids[last_req_index], self.spec_token_ids[empty_index]) = (
+            self.spec_token_ids[last_req_index], self.spec_token_ids[empty_index] = (
                 self.spec_token_ids[empty_index],
                 self.spec_token_ids[last_req_index],
             )

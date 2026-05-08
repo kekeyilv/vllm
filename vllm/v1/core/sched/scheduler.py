@@ -121,9 +121,9 @@ class Scheduler(SchedulerInterface):
         self.connector_prefix_cache_stats: PrefixCacheStats | None = None
         self.recompute_kv_load_failures = True
         if self.vllm_config.kv_transfer_config is not None:
-            assert not self.is_encoder_decoder, (
-                "Encoder-decoder models are not currently supported with KV connectors"
-            )
+            assert (
+                not self.is_encoder_decoder
+            ), "Encoder-decoder models are not currently supported with KV connectors"
             self.connector = KVConnectorFactory.create_connector(
                 config=self.vllm_config,
                 role=KVConnectorRole.SCHEDULER,
@@ -264,9 +264,9 @@ class Scheduler(SchedulerInterface):
 
             self.routed_experts_reader = RoutedExpertsReader.create()
 
-            assert len(kv_cache_config.kv_cache_groups) > 0, (
-                "enable_return_routed_experts requires at least one kv cache group"
-            )
+            assert (
+                len(kv_cache_config.kv_cache_groups) > 0
+            ), "enable_return_routed_experts requires at least one kv cache group"
             # Find the attention group for routed experts indexing.
             self.routed_experts_attn_gid = 0
             for gid, group in enumerate(kv_cache_config.kv_cache_groups):
@@ -302,9 +302,9 @@ class Scheduler(SchedulerInterface):
         num_new_local_computed_tokens: int = 0,
         num_external_computed_tokens: int = 0,
     ) -> int:
-        assert num_external_computed_tokens == 0, (
-            "External KV connector is not verified yet"
-        )
+        assert (
+            num_external_computed_tokens == 0
+        ), "External KV connector is not verified yet"
         num_computed_tokens = (
             request.num_computed_tokens
             + num_new_local_computed_tokens
@@ -608,55 +608,71 @@ class Scheduler(SchedulerInterface):
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
-                    # Normal prefix-cache lookup.  DAG block inheritance is
-                    # handled separately at NewRequestData assembly time: the
-                    # inherited ancestor blocks are prepended to block_ids there
-                    # so that the merge node can attend to them during its own
-                    # full prefill.  We must NOT count them as "pre-computed
-                    # tokens of D's own prompt" (which is what passing them as
-                    # new_computed_blocks / num_new_local_computed_tokens would
-                    # imply — that would incorrectly skip D's own prefill).
-                    new_computed_blocks, num_new_local_computed_tokens = (
-                        self.kv_cache_manager.get_computed_blocks(request)
-                    )
+                    if request.dag_context is None:
+                        # Normal prefix-cache lookup.  DAG block inheritance is
+                        # handled separately at NewRequestData assembly time: the
+                        # inherited ancestor blocks are prepended to block_ids there
+                        # so that the merge node can attend to them during its own
+                        # full prefill.  We must NOT count them as "pre-computed
+                        # tokens of D's own prompt" (which is what passing them as
+                        # new_computed_blocks / num_new_local_computed_tokens would
+                        # imply — that would incorrectly skip D's own prefill).
+                        new_computed_blocks, num_new_local_computed_tokens = (
+                            self.kv_cache_manager.get_computed_blocks(request)
+                        )
 
-                    # Get externally-cached tokens if using a KVConnector.
-                    if self.connector is not None:
-                        ext_tokens, load_kv_async = (
-                            self.connector.get_num_new_matched_tokens(
-                                request, num_new_local_computed_tokens
+                        # Get externally-cached tokens if using a KVConnector.
+                        if self.connector is not None:
+                            ext_tokens, load_kv_async = (
+                                self.connector.get_num_new_matched_tokens(
+                                    request, num_new_local_computed_tokens
+                                )
+                            )
+
+                            if ext_tokens is None:
+                                # The request cannot be scheduled because
+                                # the KVConnector couldn't determine
+                                # the number of matched tokens.
+                                request_queue.pop_request()
+                                step_skipped_waiting.prepend_request(request)
+                                continue
+
+                            num_external_computed_tokens = ext_tokens
+
+                            connector_prefix_cache_queries = (
+                                request.num_tokens - num_new_local_computed_tokens
+                            )
+                            connector_prefix_cache_hits = num_external_computed_tokens
+
+                        # Total computed tokens (local + external).
+                        num_computed_tokens = (
+                            num_new_local_computed_tokens + num_external_computed_tokens
+                        )
+                        assert num_computed_tokens <= request.num_tokens
+
+                        # Track first scheduled prefill, not post-preemption repeat prefills
+                        if request.prefill_stats is not None:
+                            assert num_computed_tokens <= request.num_prompt_tokens
+                            request.prefill_stats.set(
+                                num_prompt_tokens=request.num_prompt_tokens,
+                                num_local_cached_tokens=num_new_local_computed_tokens,
+                                num_external_cached_tokens=num_external_computed_tokens,
+                            )
+                    else:
+                        new_computed_blocks = (
+                            self.kv_cache_manager.build_kv_blocks_from_ids(
+                                list(
+                                    itertools.chain.from_iterable(
+                                        request.dag_context.inherited_block_ids
+                                    )
+                                )
                             )
                         )
-
-                        if ext_tokens is None:
-                            # The request cannot be scheduled because
-                            # the KVConnector couldn't determine
-                            # the number of matched tokens.
-                            request_queue.pop_request()
-                            step_skipped_waiting.prepend_request(request)
-                            continue
-
-                        num_external_computed_tokens = ext_tokens
-
-                        connector_prefix_cache_queries = (
-                            request.num_tokens - num_new_local_computed_tokens
+                        num_new_local_computed_tokens = (
+                            request.dag_context.num_inherited_tokens
                         )
-                        connector_prefix_cache_hits = num_external_computed_tokens
-
-                    # Total computed tokens (local + external).
-                    num_computed_tokens = (
-                        num_new_local_computed_tokens + num_external_computed_tokens
-                    )
-                    assert num_computed_tokens <= request.num_tokens
-
-                    # Track first scheduled prefill, not post-preemption repeat prefills
-                    if request.prefill_stats is not None:
-                        assert num_computed_tokens <= request.num_prompt_tokens
-                        request.prefill_stats.set(
-                            num_prompt_tokens=request.num_prompt_tokens,
-                            num_local_cached_tokens=num_new_local_computed_tokens,
-                            num_external_cached_tokens=num_external_computed_tokens,
-                        )
+                        num_computed_tokens = num_new_local_computed_tokens
+                        pass
                 else:
                     # KVTransfer: WAITING reqs have num_computed_tokens > 0
                     # after async KV recvs are completed.
@@ -885,36 +901,14 @@ class Scheduler(SchedulerInterface):
                 )
 
         # Construct the scheduler output.
-        #
-        # DAG block inheritance: for merge nodes with dag_inherited_block_ids,
-        # prepend the inherited ancestor block IDs to the front of the block
-        # table.  The scheduler allocated slots only for D's own prompt tokens
-        # (num_computed_tokens = 0, full prefill of D's prompt).  The inherited
-        # blocks sit ahead in the block table so that paged attention can see
-        # ancestor KV while computing D's own tokens — this is the zero-prefill
-        # property of DAG-RoPE (D attends to branches via the block table
-        # rather than re-reading their text).
-        def _with_dag_inherited(req, block_ids: tuple) -> tuple:
-            inherited = getattr(req, "dag_inherited_block_ids", None)
-            if not inherited:
-                return block_ids
-            # Prepend to group-0; replicate for any additional groups.
-            return (inherited + list(block_ids[0]),) + tuple(
-                inherited + list(g) for g in block_ids[1:]
-            )
-
         if self.use_v2_model_runner:
             scheduled_new_reqs = scheduled_new_reqs + scheduled_resumed_reqs
             scheduled_resumed_reqs = []
             new_reqs_data = [
                 NewRequestData.from_request(
                     req,
-                    _with_dag_inherited(
-                        req,
-                        req_to_new_blocks[req.request_id].get_block_ids(),
-                    ),
+                    req_to_new_blocks[req.request_id].get_block_ids(),
                     req._all_token_ids,
-                    dag_position_offset=req.dag_position_offset,
                 )
                 for req in scheduled_new_reqs
             ]
@@ -922,11 +916,7 @@ class Scheduler(SchedulerInterface):
             new_reqs_data = [
                 NewRequestData.from_request(
                     req,
-                    _with_dag_inherited(
-                        req,
-                        req_to_new_blocks[req.request_id].get_block_ids(),
-                    ),
-                    dag_position_offset=req.dag_position_offset,
+                    req_to_new_blocks[req.request_id].get_block_ids(),
                 )
                 for req in scheduled_new_reqs
             ]
@@ -949,6 +939,14 @@ class Scheduler(SchedulerInterface):
             if self.needs_kv_cache_zeroing
             else None
         )
+
+        # Record new block ids into DAG context
+        for req in scheduled_new_reqs:
+            if req.dag_context is not None:
+                req.dag_context.dag_session.submit_blocks(
+                    req.dag_context.node_id,
+                    req_to_new_blocks[req.request_id].get_block_ids(),
+                )
 
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
@@ -998,9 +996,9 @@ class Scheduler(SchedulerInterface):
         NOTE: The request should be popped from the running queue outside of this
         method.
         """
-        assert request.status == RequestStatus.RUNNING, (
-            "Only running requests can be preempted"
-        )
+        assert (
+            request.status == RequestStatus.RUNNING
+        ), "Only running requests can be preempted"
         self.kv_cache_manager.free(request)
         self.encoder_cache_manager.free(request)
         request.status = RequestStatus.PREEMPTED

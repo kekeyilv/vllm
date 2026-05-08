@@ -15,6 +15,7 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
+from vllm.v1.dag.context import DAGContext
 from vllm.v1.metrics.stats import PrefillStats, SchedulerStats
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 from vllm.v1.serial_utils import UtilityResult
@@ -114,6 +115,8 @@ class EngineCoreRequest(
     external_req_id: str | None = None
 
     reasoning_ended: bool | None = None
+
+    dag_context: DAGContext | None = None
 
     @property
     def params(self) -> SamplingParams | PoolingParams:

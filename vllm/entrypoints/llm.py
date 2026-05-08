@@ -85,6 +85,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils.counter import Counter
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.utils.tqdm_utils import maybe_tqdm
+from vllm.v1.dag import DAGTopology
 from vllm.v1.engine import PauseMode
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
@@ -241,16 +242,16 @@ class LLM:
         hf_overrides: HfOverrides | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
         pooler_config: PoolerConfig | None = None,
-        structured_outputs_config: dict[str, Any]
-        | StructuredOutputsConfig
-        | None = None,
+        structured_outputs_config: (
+            dict[str, Any] | StructuredOutputsConfig | None
+        ) = None,
         profiler_config: dict[str, Any] | ProfilerConfig | None = None,
         attention_config: dict[str, Any] | AttentionConfig | None = None,
         kv_cache_memory_bytes: int | None = None,
         compilation_config: int | dict[str, Any] | CompilationConfig | None = None,
-        quantization_config: dict[str, Any]
-        | OnlineQuantizationConfigArgs
-        | None = None,
+        quantization_config: (
+            dict[str, Any] | OnlineQuantizationConfigArgs | None
+        ) = None,
         logits_processors: list[str | type[LogitsProcessor]] | None = None,
         **kwargs: Any,
     ) -> None:
@@ -385,6 +386,7 @@ class LLM:
         self.engine_class = type(self.llm_engine)
 
         self.request_counter = Counter()
+        self.dag_session_counter = Counter()
         self.default_sampling_params: dict[str, Any] | None = None
 
         supported_tasks = self.llm_engine.get_supported_tasks()
@@ -975,10 +977,67 @@ class LLM:
 
         return engine_input
 
+    def run_dag(
+        self,
+        dag: DAGTopology,
+        sys_prompt: str,
+        sampling_params: SamplingParams,
+        return_timing: bool = False,
+    ) -> dict[str, RequestOutput] | tuple[dict[str, RequestOutput], dict[str, float]]:
+        """Generate outputs for all nodes in a DAG-structured agent workflow.
+
+        Nodes are processed in topological order.  Parallel branches receive the
+        same RoPE start offset, enabling zero-prefill KV-cache reuse at merge
+        points via DAG-RoPE position assignment.
+
+        Args:
+            dag: The DAG topology.
+            sampling_params: Applied to every node.
+            return_timing: When True, also return per-node TTFT (ms) as a second
+                value.  TTFT = wall-clock from add_request() to first token in step().
+
+        Returns:
+            results dict mapping node_id → RequestOutput.
+            If return_timing=True, also returns {node_id: ttft_ms}.
+        """
+        from vllm.v1.dag import DAGSession
+
+        session = DAGSession(dag, sys_prompt, next(self.dag_session_counter))
+        results: dict[str, RequestOutput] = {}
+        per_node_ttft_ms: dict[str, float] = {}
+
+        for index, node_id in enumerate(dag.topo_sort()):
+            conversation: list[ChatCompletionMessageParam] = []
+            prompt = session.dag.get_node(node_id).prompt
+            if isinstance(prompt, str):
+                conversation.append({"role": "user", "content": prompt})
+            else:
+                conversation.extend(prompt)
+            if index == 0:
+                # Prepend system prompt to the root node
+                conversation.insert(
+                    0, {"role": "system", "content": session.system_prompt}
+                )
+
+            result, ttft = self.llm_engine.run_dag_request(
+                self._preprocess_chat_one(conversation),
+                node_id,
+                session,
+                sampling_params,
+            )
+            results[node_id] = result
+            per_node_ttft_ms[node_id] = ttft
+
+        if return_timing:
+            return results, per_node_ttft_ms
+        return results
+
     def chat(
         self,
-        messages: list[ChatCompletionMessageParam]
-        | Sequence[list[ChatCompletionMessageParam]],
+        messages: (
+            list[ChatCompletionMessageParam]
+            | Sequence[list[ChatCompletionMessageParam]]
+        ),
         sampling_params: SamplingParams | Sequence[SamplingParams] | None = None,
         use_tqdm: bool | Callable[..., tqdm] = True,
         lora_request: Sequence[LoRARequest] | LoRARequest | None = None,
@@ -1165,8 +1224,7 @@ class LLM:
             )
 
         if pooling_task is None:
-            raise ValueError(
-                """
+            raise ValueError("""
                 pooling_task required for `LLM.encode`.
                 Please use one of the more specific methods or set the pooling_task when using `LLM.encode`:
                   - For embeddings, use `LLM.embed(...)` or `pooling_task="embed"`.
@@ -1175,8 +1233,7 @@ class LLM:
                   - For rewards, `pooling_task="classify"` or `pooling_task="token_classify"`.
                   - For token classification, use `pooling_task="token_classify"`.
                   - For multi-vector retrieval, use `pooling_task="token_embed"`.
-                """  # noqa: E501
-            )
+                """)  # noqa: E501
 
         if (
             pooling_task in ("embed", "token_embed")
@@ -1589,9 +1646,9 @@ class LLM:
     def _add_completion_requests(
         self,
         prompts: PromptType | Sequence[PromptType],
-        params: SamplingParams
-        | PoolingParams
-        | Sequence[SamplingParams | PoolingParams],
+        params: (
+            SamplingParams | PoolingParams | Sequence[SamplingParams | PoolingParams]
+        ),
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,
         lora_request: Sequence[LoRARequest] | LoRARequest | None = None,
@@ -1625,9 +1682,9 @@ class LLM:
     def _run_completion(
         self,
         prompts: PromptType | Sequence[PromptType],
-        params: SamplingParams
-        | PoolingParams
-        | Sequence[SamplingParams | PoolingParams],
+        params: (
+            SamplingParams | PoolingParams | Sequence[SamplingParams | PoolingParams]
+        ),
         output_type: type[_O],
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,
@@ -1649,11 +1706,13 @@ class LLM:
 
     def _run_chat(
         self,
-        messages: list[ChatCompletionMessageParam]
-        | Sequence[list[ChatCompletionMessageParam]],
-        params: SamplingParams
-        | PoolingParams
-        | Sequence[SamplingParams | PoolingParams],
+        messages: (
+            list[ChatCompletionMessageParam]
+            | Sequence[list[ChatCompletionMessageParam]]
+        ),
+        params: (
+            SamplingParams | PoolingParams | Sequence[SamplingParams | PoolingParams]
+        ),
         output_type: type[_O],
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,

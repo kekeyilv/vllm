@@ -28,6 +28,7 @@ from vllm.tasks import GENERATION_TASKS, POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
 from vllm.utils.jsontree import json_iter_leaves
+from vllm.v1.dag.context import DAGContext
 from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)
@@ -237,6 +238,7 @@ class InputProcessor:
         prompt: PromptType | EngineInput,
         params: SamplingParams | PoolingParams,
         supported_tasks: tuple[SupportedTask, ...],
+        dag_context: DAGContext | None = None,
         arrival_time: float | None = None,
         lora_request: LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
@@ -371,6 +373,7 @@ class InputProcessor:
             data_parallel_rank=data_parallel_rank,
             trace_headers=trace_headers,
             resumable=resumable,
+            dag_context=dag_context,
         )
 
     def _validate_prompt_len(

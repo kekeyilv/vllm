@@ -1,21 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 """DAG topology specification for agent workflows."""
+
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Dict, List, Set
+
+from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 
 
 @dataclass
 class DAGNode:
     """A node in the agent workflow DAG."""
+
     node_id: str
-    prompt: str
+    prompt: str | list[ChatCompletionMessageParam]
     parents: List[str] = field(default_factory=list)
 
 
 @dataclass
 class DAGTopology:
     """DAG topology for an agent workflow."""
+
     nodes: Dict[str, DAGNode] = field(default_factory=dict)
 
     def add_node(self, node: DAGNode) -> None:

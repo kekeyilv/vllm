@@ -1167,7 +1167,7 @@ class GPUModelRunner(
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
-                dag_position_offset=new_req_data.dag_position_offset,
+                dag_context=new_req_data.dag_context,
             )
             self.requests[req_id] = req_state
             self.late_interaction_runner.register_request(req_id, pooling_params)
@@ -1816,14 +1816,11 @@ class GPUModelRunner(
         # positions so that positions = dag_offset + num_computed + query_idx
         # instead of the default num_computed + query_idx.
         dag_offsets = np.zeros(num_reqs, dtype=np.int64)
-        has_dag_reqs = False
         for req_idx, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
-            offset = self.requests[req_id].dag_position_offset
-            if offset is not None:
-                dag_offsets[req_idx] = offset
-                has_dag_reqs = True
-        if has_dag_reqs:
-            positions_np = positions_np + dag_offsets[req_indices]
+            dag_context = self.requests[req_id].dag_context
+            if dag_context is not None:
+                dag_offsets[req_idx] = dag_context.position_offset
+        positions_np = positions_np + dag_offsets[req_indices]
 
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)

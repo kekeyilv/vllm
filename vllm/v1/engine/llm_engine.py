@@ -6,6 +6,8 @@ from collections.abc import Callable, Mapping
 from copy import copy
 from typing import TYPE_CHECKING, Any
 
+from vllm.v1.dag.session import DAGSession
+
 if TYPE_CHECKING:
     from vllm.v1.dag.topology import DAGTopology
 
@@ -276,7 +278,9 @@ class LLMEngine:
         for node_id in dag.topo_sort():
             node = dag.get_node(node_id)
             node_own_prompts[node_id] = node.prompt
-            position_offset = session.compute_offset(node_id) + tail_delta.get(node_id, 0)
+            position_offset = session.compute_offset(node_id) + tail_delta.get(
+                node_id, 0
+            )
 
             # Build effective prompt using proper chat-template roles.
             #
@@ -291,17 +295,20 @@ class LLMEngine:
             #   the inherited KV-cache block table, not repeated as text.
             if include_parent_context and node.parents:
                 ancestors_ordered = [
-                    nid for nid in dag.topo_sort()
+                    nid
+                    for nid in dag.topo_sort()
                     if nid in session._ancestors_cache[node_id]
                 ]
                 messages: list[dict] = []
                 for anc_id in ancestors_ordered:
                     if anc_id in node_own_prompts:
-                        messages.append({"role": "user",
-                                         "content": node_own_prompts[anc_id]})
+                        messages.append(
+                            {"role": "user", "content": node_own_prompts[anc_id]}
+                        )
                     if anc_id in node_text_outputs:
-                        messages.append({"role": "assistant",
-                                         "content": node_text_outputs[anc_id]})
+                        messages.append(
+                            {"role": "assistant", "content": node_text_outputs[anc_id]}
+                        )
                 messages.append({"role": "user", "content": node.prompt})
                 effective_prompt = _apply_template(messages)
             else:
@@ -339,7 +346,11 @@ class LLMEngine:
             # stays 0, so D re-prefills its own prompt in full — the inherited
             # blocks merely extend the block table so D can attend to ancestor
             # KV during that prefill.
-            if not include_parent_context and len(node.parents) > 1 and _scheduler is not None:
+            if (
+                not include_parent_context
+                and len(node.parents) > 1
+                and _scheduler is not None
+            ):
                 inherited = session.get_inherited_block_ids(node_id)
                 if inherited and inherited[0]:
                     extra["dag_inherited_block_ids"] = inherited[0]
@@ -533,6 +544,70 @@ class LLMEngine:
             self.engine_core.add_request(child_request)
 
         return req_id
+
+    def add_dag_request(
+        self,
+        prompt: EngineInput,
+        nodeid: str,
+        session: DAGSession,
+        sampling_params: SamplingParams,
+        lora_request: LoRARequest | None = None,
+        priority: int = 0,
+    ) -> str:
+        request_id = f"dag{session.session_id}_{nodeid}"
+
+        request = self.input_processor.process_inputs(
+            request_id,
+            prompt,
+            sampling_params,
+            dag_context=session.get_context(nodeid),
+            supported_tasks=self.get_supported_tasks(),
+            arrival_time=None,
+            lora_request=lora_request,
+            tokenization_kwargs=None,
+            trace_headers=None,
+            priority=priority,
+        )
+
+        self.engine_core.add_request(request)
+        return request_id
+
+    def run_dag_request(
+        self,
+        prompt: EngineInput,
+        nodeid: str,
+        session: DAGSession,
+        sampling_params: SamplingParams,
+        lora_request: LoRARequest | None = None,
+        priority: int = 0,
+    ) -> tuple[RequestOutput, float]:
+        t_submit = time.time()
+        req_id = self.add_dag_request(
+            prompt, nodeid, session, sampling_params, lora_request, priority
+        )
+        first_token_time: float | None = None
+        node_output: RequestOutput | None = None
+
+        while node_output is None:
+            step_outputs = self.step()
+            for out in step_outputs:
+                if out.request_id == req_id:
+                    if (
+                        first_token_time is None
+                        and out.outputs
+                        and out.outputs[0].token_ids
+                    ):
+                        first_token_time = time.time()
+                    if out.finished:
+                        node_output = out
+                        break
+                    
+        ttft_ms = (
+            (first_token_time - t_submit) * 1000.0
+            if first_token_time is not None
+            else 0.0
+        )
+        return (node_output, ttft_ms)
 
     def step(self) -> list[RequestOutput | PoolingRequestOutput]:
         if self.should_execute_dummy_batch:

@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING
 
+from vllm.v1.dag.context import DAGContext
+
 if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
@@ -42,12 +44,7 @@ class NewRequestData:
     # Only used for v2 model runner.
     prefill_token_ids: list[int] | None = None
 
-    # DAG-RoPE: absolute position offset for this node's first token.
-    # None means standard sequential position assignment.
-    dag_position_offset: int | None = None
-
-    # DAG-RoPE: number of inherited ancestor tokens for merge nodes.
-    dag_num_inherited_tokens: int = 0
+    dag_context: DAGContext | None = None
 
     @classmethod
     def from_request(
@@ -55,7 +52,6 @@ class NewRequestData:
         request: Request,
         block_ids: tuple[list[int], ...],
         prefill_token_ids: list[int] | None = None,
-        dag_position_offset: int | None = None,
     ) -> "NewRequestData":
         return cls(
             req_id=request.request_id,
@@ -68,8 +64,7 @@ class NewRequestData:
             lora_request=request.lora_request,
             prompt_embeds=request.prompt_embeds,
             prefill_token_ids=prefill_token_ids,
-            dag_position_offset=dag_position_offset,
-            dag_num_inherited_tokens=request.dag_num_inherited_tokens,
+            dag_context=request.dag_context,
         )
 
     def __repr__(self) -> str:
