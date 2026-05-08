@@ -943,8 +943,7 @@ class Scheduler(SchedulerInterface):
         # Record new block ids into DAG context
         for req in scheduled_new_reqs:
             if req.dag_context is not None:
-                req.dag_context.dag_session.submit_blocks(
-                    req.dag_context.node_id,
+                req.dag_context.node_state.submit_blocks(
                     req_to_new_blocks[req.request_id].get_block_ids(),
                 )
 

@@ -6,7 +6,6 @@ from typing import Dict, Iterable, List, Set
 
 import torch
 
-from vllm.v1.dag.context import DAGContext
 from vllm.v1.dag.topology import DAGTopology
 
 
@@ -17,7 +16,31 @@ class NodeState:
     completed: bool = False
     offset: int = 0  # RoPE position offset (first token position)
     length: int = 0  # Number of tokens in this node
-    block_ids: List[List[int]] = []  # Per-group block IDs
+    block_ids: List[List[int]] = field(default_factory=list)  # Per-group block IDs
+
+    def submit_blocks(self, block_ids: Iterable[List[int]]):
+        self.block_ids.extend(block_ids)
+
+
+@dataclass
+class DAGContext:
+    """Attached to a request to enable DAG-aware position assignment.
+
+    Serializable (plain Python types only) so it can transit the ZMQ boundary
+    between EngineCore and the model-runner worker process.
+    """
+
+    node_id: str
+    node_state: NodeState
+    # Absolute RoPE start position for this node's first token.
+    position_offset: int
+    # Per-group ancestor block IDs to pass as pre-computed blocks.
+    inherited_block_ids: List[List[int]] = field(default_factory=list)
+    is_merge: bool = False
+    # tail-alignment deltas: {parent_node_id: shift}
+    tail_deltas: Dict[str, int] = field(default_factory=dict)
+    # Total number of tokens in ancestors' prompt and output
+    num_inherited_tokens: int = 0
 
 
 class DAGSession:
@@ -40,9 +63,11 @@ class DAGSession:
             self._ancestors_cache[nid] = dag.ancestors(nid)
 
     def get_context(self, node_id: str) -> DAGContext:
+        if node_id not in self.node_states:
+            self.node_states[node_id] = NodeState()
         return DAGContext(
             node_id=node_id,
-            dag_session=self,
+            node_state=self.node_states[node_id],
             position_offset=self.compute_offset(node_id),
             inherited_block_ids=self.get_inherited_block_ids(node_id),
             tail_deltas=self.compute_tail_deltas(node_id),
@@ -72,6 +97,8 @@ class DAGSession:
             return self._tail_deltas_cache[node_id]
         node = self.dag.get_node(node_id)
 
+        if len(node.parents) == 0:
+            return {}
         L_max = max(self.node_states[pid].length for pid in node.parents)
         tail_deltas = {
             pid: L_max - self.node_states[pid].length for pid in node.parents
@@ -123,11 +150,6 @@ class DAGSession:
             own = self.node_states[node_id].block_ids
             return [inherited[g] + own[g] for g in range(len(inherited))]
         return inherited
-
-    def submit_blocks(self, node_id: str, block_ids: Iterable[List[int]]):
-        if node_id not in self.node_states:
-            self.node_states[node_id] = NodeState()
-        self.node_states[node_id].block_ids.extend(block_ids)
 
     def register_completion(
         self,

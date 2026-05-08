@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING
 
-from vllm.v1.dag.context import DAGContext
+from vllm.v1.dag.session import DAGContext
 
 if TYPE_CHECKING:
     import numpy as np

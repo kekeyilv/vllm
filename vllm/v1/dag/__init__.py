@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-from vllm.v1.dag.context import DAGContext
-from vllm.v1.dag.session import DAGSession, NodeState
+from vllm.v1.dag.session import DAGSession, NodeState, DAGContext
 from vllm.v1.dag.topology import DAGNode, DAGTopology
 
 __all__ = [

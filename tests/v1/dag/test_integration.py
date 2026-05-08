@@ -7,8 +7,7 @@ zero_prefill_at_merge) require a live vLLM engine and GPU.
 """
 import pytest
 
-from vllm.v1.dag.context import DAGContext
-from vllm.v1.dag.session import DAGSession
+from vllm.v1.dag.session import DAGSession, DAGContext
 from vllm.v1.dag.topology import DAGNode, DAGTopology
 
 

@@ -28,7 +28,7 @@ from vllm.tasks import GENERATION_TASKS, POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
 from vllm.utils.jsontree import json_iter_leaves
-from vllm.v1.dag.context import DAGContext
+from vllm.v1.dag.session import DAGContext
 from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)
