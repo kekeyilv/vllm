@@ -2,6 +2,7 @@
 """DAG session manager - tracks KV cache state across a DAG execution."""
 
 from dataclasses import dataclass, field
+import itertools
 from typing import Dict, Iterable, List, Set
 
 import torch
@@ -136,7 +137,9 @@ class DAGSession:
         all_blocks: List[int] = []
         for anc_id in ordered_ancestors:
             assert anc_id in self.node_states
-            for bid in self.node_states[anc_id].block_ids[0]:
+            for bid in itertools.chain.from_iterable(
+                self.node_states[anc_id].block_ids
+            ):
                 if bid not in seen:
                     seen.add(bid)
                     all_blocks.append(bid)

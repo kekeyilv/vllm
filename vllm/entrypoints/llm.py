@@ -981,7 +981,7 @@ class LLM:
         self,
         dag: DAGTopology,
         sys_prompt: str,
-        sampling_params: SamplingParams,
+        sampling_params: SamplingParams | dict[str, SamplingParams],
         return_timing: bool = False,
     ) -> dict[str, RequestOutput] | tuple[dict[str, RequestOutput], dict[str, float]]:
         """Generate outputs for all nodes in a DAG-structured agent workflow.
@@ -1020,14 +1020,17 @@ class LLM:
                 )
 
             result, ttft = self.llm_engine.run_dag_request(
-                self._preprocess_chat_one(conversation),
-                node_id,
-                session,
-                sampling_params,
+                prompt=self._preprocess_chat_one(conversation),
+                nodeid=node_id,
+                session=session,
+                sampling_params=(
+                    sampling_params
+                    if isinstance(sampling_params, SamplingParams)
+                    else sampling_params[node_id]
+                ),
             )
             results[node_id] = result
             per_node_ttft_ms[node_id] = ttft
-
         if return_timing:
             return results, per_node_ttft_ms
         return results

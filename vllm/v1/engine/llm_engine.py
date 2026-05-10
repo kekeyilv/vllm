@@ -569,6 +569,10 @@ class LLMEngine:
             priority=priority,
         )
 
+        prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
+        self.input_processor.assign_request_id(request)
+
+        self.output_processor.add_request(request, prompt_text, None, 0)
         self.engine_core.add_request(request)
         return request_id
 
@@ -601,7 +605,12 @@ class LLMEngine:
                     if out.finished:
                         node_output = out
                         break
-                    
+
+        assert node_output.prompt_token_ids
+        session.register_completion(
+            nodeid,
+            len(node_output.prompt_token_ids) + len(node_output.outputs[0].token_ids),
+        )
         ttft_ms = (
             (first_token_time - t_submit) * 1000.0
             if first_token_time is not None
