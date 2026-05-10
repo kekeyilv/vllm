@@ -182,6 +182,9 @@ class Scheduler(SchedulerInterface):
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
 
+        # KV Cache blocks allocated by each request
+        self.req_blocks: dict[str, KVCacheBlocks] = {}
+
         # Encoder-related.
         # Calculate encoder cache size if applicable
         supports_mm_inputs = mm_registry.supports_multimodal_inputs(
@@ -620,59 +623,53 @@ class Scheduler(SchedulerInterface):
                         new_computed_blocks, num_new_local_computed_tokens = (
                             self.kv_cache_manager.get_computed_blocks(request)
                         )
-
-                        # Get externally-cached tokens if using a KVConnector.
-                        if self.connector is not None:
-                            ext_tokens, load_kv_async = (
-                                self.connector.get_num_new_matched_tokens(
-                                    request, num_new_local_computed_tokens
-                                )
-                            )
-
-                            if ext_tokens is None:
-                                # The request cannot be scheduled because
-                                # the KVConnector couldn't determine
-                                # the number of matched tokens.
-                                request_queue.pop_request()
-                                step_skipped_waiting.prepend_request(request)
-                                continue
-
-                            num_external_computed_tokens = ext_tokens
-
-                            connector_prefix_cache_queries = (
-                                request.num_tokens - num_new_local_computed_tokens
-                            )
-                            connector_prefix_cache_hits = num_external_computed_tokens
-
-                        # Total computed tokens (local + external).
-                        num_computed_tokens = (
-                            num_new_local_computed_tokens + num_external_computed_tokens
-                        )
-                        assert num_computed_tokens <= request.num_tokens
-
-                        # Track first scheduled prefill, not post-preemption repeat prefills
-                        if request.prefill_stats is not None:
-                            assert num_computed_tokens <= request.num_prompt_tokens
-                            request.prefill_stats.set(
-                                num_prompt_tokens=request.num_prompt_tokens,
-                                num_local_cached_tokens=num_new_local_computed_tokens,
-                                num_external_cached_tokens=num_external_computed_tokens,
-                            )
                     else:
                         new_computed_blocks = (
-                            self.kv_cache_manager.build_kv_blocks_from_ids(
-                                list(
-                                    itertools.chain.from_iterable(
-                                        request.dag_context.inherited_block_ids
-                                    )
-                                )
-                            )
+                            self.kv_cache_manager.empty_kv_cache_blocks
                         )
+                        for req_id in request.dag_context.ancestor_req_ids:
+                            new_computed_blocks += self.req_blocks[req_id]
                         num_new_local_computed_tokens = (
                             request.dag_context.num_inherited_tokens
                         )
-                        num_computed_tokens = num_new_local_computed_tokens
-                        pass
+
+                    # Get externally-cached tokens if using a KVConnector.
+                    if self.connector is not None:
+                        ext_tokens, load_kv_async = (
+                            self.connector.get_num_new_matched_tokens(
+                                request, num_new_local_computed_tokens
+                            )
+                        )
+
+                        if ext_tokens is None:
+                            # The request cannot be scheduled because
+                            # the KVConnector couldn't determine
+                            # the number of matched tokens.
+                            request_queue.pop_request()
+                            step_skipped_waiting.prepend_request(request)
+                            continue
+
+                        num_external_computed_tokens = ext_tokens
+
+                        connector_prefix_cache_queries = (
+                            request.num_tokens - num_new_local_computed_tokens
+                        )
+                        connector_prefix_cache_hits = num_external_computed_tokens
+
+                    # Total computed tokens (local + external).
+                    num_computed_tokens = (
+                        num_new_local_computed_tokens + num_external_computed_tokens
+                    )
+                    assert num_computed_tokens <= request.num_tokens
+
+                    # Track first scheduled prefill, not post-preemption repeat prefills
+                    if request.prefill_stats is not None:
+                        assert num_computed_tokens <= request.num_prompt_tokens
+                        request.prefill_stats.set(
+                            num_prompt_tokens=request.num_prompt_tokens,
+                            num_local_cached_tokens=num_new_local_computed_tokens,
+                            num_external_cached_tokens=num_external_computed_tokens,
+                        )
                 else:
                     # KVTransfer: WAITING reqs have num_computed_tokens > 0
                     # after async KV recvs are completed.
@@ -793,6 +790,12 @@ class Scheduler(SchedulerInterface):
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
                     break
+
+                if request.request_id not in self.req_blocks:
+                    self.req_blocks[request.request_id] = (
+                        self.kv_cache_manager.empty_kv_cache_blocks
+                    )
+                self.req_blocks[request.request_id] += new_blocks
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
@@ -939,13 +942,6 @@ class Scheduler(SchedulerInterface):
             if self.needs_kv_cache_zeroing
             else None
         )
-
-        # Record new block ids into DAG context
-        for req in scheduled_new_reqs:
-            if req.dag_context is not None:
-                req.dag_context.node_state.submit_blocks(
-                    req_to_new_blocks[req.request_id].get_block_ids(),
-                )
 
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,

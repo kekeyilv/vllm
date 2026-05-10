@@ -540,13 +540,6 @@ class KVCacheManager:
         # Only create new KVCacheBlocks for non-empty blocks
         return KVCacheBlocks(blocks) if any(blocks) else self.empty_kv_cache_blocks
 
-    def build_kv_blocks_from_ids(self, block_ids: list[int]) -> KVCacheBlocks:
-        """Wrap block IDs into KVCacheBlocks for DAG inheritance."""
-        blocks_seq = [self.block_pool.blocks[bid] for bid in block_ids]
-        return KVCacheBlocks(
-            tuple(blocks_seq for _ in range(self.num_kv_cache_groups))
-        )
-
     def take_new_block_ids(self) -> list[int]:
         """Drain and return new attention block IDs for zeroing."""
         ids: list[int] = []

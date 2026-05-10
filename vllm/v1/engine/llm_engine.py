@@ -547,7 +547,7 @@ class LLMEngine:
 
     def add_dag_request(
         self,
-        prompt: EngineInput,
+        prompt: list[int],
         nodeid: str,
         session: DAGSession,
         sampling_params: SamplingParams,
@@ -574,11 +574,12 @@ class LLMEngine:
 
         self.output_processor.add_request(request, prompt_text, None, 0)
         self.engine_core.add_request(request)
-        return request_id
+        return request.request_id
 
     def run_dag_request(
         self,
         prompt: EngineInput,
+        anc_prompt: list[int],
         nodeid: str,
         session: DAGSession,
         sampling_params: SamplingParams,
@@ -586,8 +587,20 @@ class LLMEngine:
         priority: int = 0,
     ) -> tuple[RequestOutput, float]:
         t_submit = time.time()
-        req_id = self.add_dag_request(
-            prompt, nodeid, session, sampling_params, lora_request, priority
+        req_id = f"dag{session.session_id}_{nodeid}"
+        prompt_token_ids = self.input_processor.process_inputs(
+            req_id, prompt, sampling_params, supported_tasks=self.get_supported_tasks()
+        ).prompt_token_ids
+
+        assert prompt_token_ids
+        # Internal request id
+        internal_req_id = self.add_dag_request(
+            anc_prompt + prompt_token_ids,
+            nodeid,
+            session,
+            sampling_params,
+            lora_request,
+            priority,
         )
         first_token_time: float | None = None
         node_output: RequestOutput | None = None
@@ -605,11 +618,11 @@ class LLMEngine:
                     if out.finished:
                         node_output = out
                         break
-
         assert node_output.prompt_token_ids
         session.register_completion(
             nodeid,
             len(node_output.prompt_token_ids) + len(node_output.outputs[0].token_ids),
+            internal_req_id,
         )
         ttft_ms = (
             (first_token_time - t_submit) * 1000.0

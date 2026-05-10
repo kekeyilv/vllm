@@ -701,6 +701,7 @@ class GPUModelRunner(
         self.num_scheduled_tokens = self._make_buffer(
             self.max_num_reqs, dtype=torch.int32
         )
+        self.dag_offsets = self._make_buffer(self.max_num_tokens, dtype=torch.int64)
 
         self.encoder_seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
         if self.dcp_world_size > 1:
@@ -1815,12 +1816,16 @@ class GPUModelRunner(
         # DAG-RoPE: for requests with a DAG position offset, shift their
         # positions so that positions = dag_offset + num_computed + query_idx
         # instead of the default num_computed + query_idx.
-        dag_offsets = np.zeros(num_reqs, dtype=np.int64)
+        dag_offsets_np = np.zeros(num_reqs, dtype=np.int64)
         for req_idx, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
             dag_context = self.requests[req_id].dag_context
             if dag_context is not None:
-                dag_offsets[req_idx] = dag_context.position_offset
-        positions_np = positions_np + dag_offsets[req_indices]
+                dag_offsets_np[req_idx] = (
+                    dag_context.position_offset 
+                    - dag_context.num_inherited_tokens
+                )
+        self.dag_offsets.np[:total_num_scheduled_tokens] = dag_offsets_np[req_indices]
+        positions_np = positions_np + self.dag_offsets.np[:total_num_scheduled_tokens]
 
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -1993,6 +1998,7 @@ class GPUModelRunner(
         req_indices_gpu = self.req_indices.gpu[:total_num_scheduled_tokens]
 
         self.query_pos.copy_to_gpu(total_num_scheduled_tokens)
+        self.dag_offsets.copy_to_gpu(total_num_scheduled_tokens)
         self.num_scheduled_tokens.np[:num_reqs] = num_scheduled_tokens
         self.num_scheduled_tokens.copy_to_gpu(num_reqs)
         num_scheduled_tokens_gpu = self.num_scheduled_tokens.gpu[:num_reqs]
@@ -3309,6 +3315,7 @@ class GPUModelRunner(
             positions = self.positions[:num_input_tokens]
             if num_input_tokens > num_scheduled_tokens:
                 self.positions[num_scheduled_tokens:num_input_tokens].zero_()
+        positions += self.dag_offsets.gpu[:num_input_tokens]
 
         if is_first_rank:
             intermediate_tensors = None
