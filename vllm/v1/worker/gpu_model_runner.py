@@ -1825,7 +1825,7 @@ class GPUModelRunner(
                     - dag_context.num_inherited_tokens
                 )
         self.dag_offsets.np[:total_num_scheduled_tokens] = dag_offsets_np[req_indices]
-        positions_np = positions_np + self.dag_offsets.np[:total_num_scheduled_tokens]
+        #positions_np = positions_np + self.dag_offsets.np[:total_num_scheduled_tokens]
 
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)

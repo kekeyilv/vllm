@@ -182,9 +182,6 @@ class Scheduler(SchedulerInterface):
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
 
-        # KV Cache blocks allocated by each request
-        self.req_blocks: dict[str, KVCacheBlocks] = {}
-
         # Encoder-related.
         # Calculate encoder cache size if applicable
         supports_mm_inputs = mm_registry.supports_multimodal_inputs(
@@ -627,8 +624,22 @@ class Scheduler(SchedulerInterface):
                         new_computed_blocks = (
                             self.kv_cache_manager.empty_kv_cache_blocks
                         )
-                        for req_id in request.dag_context.ancestor_req_ids:
-                            new_computed_blocks += self.req_blocks[req_id]
+                        for anc_state in request.dag_context.ancestor_states:
+                            req_id = anc_state.request_id
+                            num_valid_blocks = (
+                                anc_state.length + self.block_size - 1
+                            ) // self.block_size
+                            new_computed_blocks += (
+                                self.kv_cache_manager.build_kv_blocks_from_ids(
+                                    list(
+                                        itertools.chain.from_iterable(
+                                            self.kv_cache_manager.get_blocks(
+                                                req_id
+                                            ).get_block_ids()
+                                        )
+                                    )[:num_valid_blocks]
+                                )
+                            )
                         num_new_local_computed_tokens = (
                             request.dag_context.num_inherited_tokens
                         )
@@ -790,12 +801,6 @@ class Scheduler(SchedulerInterface):
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
                     break
-
-                if request.request_id not in self.req_blocks:
-                    self.req_blocks[request.request_id] = (
-                        self.kv_cache_manager.empty_kv_cache_blocks
-                    )
-                self.req_blocks[request.request_id] += new_blocks
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that

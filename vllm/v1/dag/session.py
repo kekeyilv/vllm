@@ -31,8 +31,8 @@ class DAGContext:
     node_id: str
     # Absolute RoPE start position for this node's first token.
     position_offset: int
-    # Request id of ancestors
-    ancestor_req_ids: List[str] = field(default_factory=list)
+    # States of ancestors nodes
+    ancestor_states: List[NodeState] = field(default_factory=list)
     is_merge: bool = False
     # tail-alignment deltas: {parent_node_id: shift}
     tail_deltas: Dict[str, int] = field(default_factory=dict)
@@ -63,7 +63,7 @@ class DAGSession:
         return DAGContext(
             node_id=node_id,
             position_offset=self.compute_offset(node_id),
-            ancestor_req_ids=self.get_ancestor_req_ids(node_id),
+            ancestor_states=self.get_ancestor_states(node_id),
             tail_deltas=self.compute_tail_deltas(node_id),
             num_inherited_tokens=self.get_num_inherited_tokens(node_id),
         )
@@ -115,9 +115,9 @@ class DAGSession:
         offset = self.compute_offset(node_id)
         return torch.arange(offset, offset + num_tokens, dtype=torch.long)
 
-    def get_ancestor_req_ids(self, node_id: str) -> List[str]:
+    def get_ancestor_states(self, node_id: str) -> List[NodeState]:
         ancestors = self._ancestors_cache[node_id]
-        return [self.node_states[anc_id].request_id for anc_id in ancestors]
+        return [self.node_states[anc_id] for anc_id in ancestors]
 
     def register_completion(
         self, node_id: str, num_tokens: int, request_id: str
@@ -130,4 +130,3 @@ class DAGSession:
             request_id=request_id,
         )
         self.node_states[node_id].completed = True
-        print(node_id, self.node_states[node_id])
