@@ -21,6 +21,17 @@ class NodeState:
 
 
 @dataclass
+class AncestorState:
+    """
+    Data of ancestors for position corrections and KV Cache indexing
+    """
+
+    request_id: str
+    length: int # number of tokens
+    position_delta: int # ancestor position correction delta
+
+
+@dataclass
 class DAGContext:
     """Attached to a request to enable DAG-aware position assignment.
 
@@ -32,12 +43,7 @@ class DAGContext:
     # Absolute RoPE start position for this node's first token.
     position_offset: int
     # States of ancestors nodes
-    ancestor_states: List[NodeState] = field(default_factory=list)
-    is_merge: bool = False
-    # tail-alignment deltas: {parent_node_id: shift}
-    tail_deltas: Dict[str, int] = field(default_factory=dict)
-    # Total number of tokens in ancestors' prompt and output
-    num_inherited_tokens: int = 0
+    ancestor_states: List[AncestorState] = field(default_factory=list)
 
 
 class DAGSession:
@@ -53,71 +59,48 @@ class DAGSession:
         self.session_id = session_id
         self.node_states: Dict[str, NodeState] = {}
         self.system_prompt = sys_prompt
-        self._ancestors_cache: Dict[str, Set[str]] = {}
-        self._tail_deltas_cache: Dict[str, Dict[str, int]] = {}
+        self._ancestors_cache: Dict[str, List[str]] = {}
 
-        for nid in dag.topo_sort():
-            self._ancestors_cache[nid] = dag.ancestors(nid)
+        # To calculate position corrections deltas,
+        # every node's ancestors must be arranged by their topological order
+        topo_ids: dict[str, int] = {}
+        for topo_id, nid in enumerate(dag.topo_sort()):
+            topo_ids[nid] = topo_id
+            ancestors = list(dag.ancestors(nid))
+            # A node's ancestors appear before the node,
+            # so their topo_ids have been determined.
+            ancestors.sort(key=lambda idx: topo_ids[idx])
+            self._ancestors_cache[nid] = ancestors
 
     def get_context(self, node_id: str) -> DAGContext:
+        ancestors = self._ancestors_cache[node_id]
+        states = []
+        current_pos = 0
+        for anc_id in ancestors:
+            node_state = self.node_states[anc_id]
+            states.append(
+                AncestorState(
+                    request_id=node_state.request_id,
+                    length=node_state.length,
+                    position_delta=current_pos - node_state.offset,
+                )
+            )
+            current_pos += node_state.length
+
         return DAGContext(
             node_id=node_id,
-            position_offset=self.compute_offset(node_id),
-            ancestor_states=self.get_ancestor_states(node_id),
-            tail_deltas=self.compute_tail_deltas(node_id),
-            num_inherited_tokens=self.get_num_inherited_tokens(node_id),
+            position_offset=current_pos,
+            ancestor_states=states
         )
 
     def compute_offset(self, node_id: str) -> int:
         """Compute RoPE position offset for a node based on DAG topology.
 
-        Parallel branches share the same starting offset (the max over parents).
+        Parallel branches share the same starting offset.
         """
-        node = self.dag.get_node(node_id)
-        if not node.parents:
-            return 0
-        return max(
-            self.node_states[pid].offset + self.node_states[pid].length
-            for pid in node.parents
-        )
-
-    def compute_tail_deltas(self, node_id: str) -> Dict[str, int]:
-        """Compute tail-alignment shifts per parent.
-
-        Returns {parent_id: delta} where delta = L_max - len(parent).
-        Shorter branches are shifted so their tails align with the longest.
-        """
-        if node_id in self._tail_deltas_cache:
-            return self._tail_deltas_cache[node_id]
-        node = self.dag.get_node(node_id)
-
-        if len(node.parents) == 0:
-            return {}
-        L_max = max(self.node_states[pid].length for pid in node.parents)
-        tail_deltas = {
-            pid: L_max - self.node_states[pid].length for pid in node.parents
-        }
-
-        for pid in node.parents:
-            # Recursively update tail_deltas
-            tail_deltas.update(self.compute_tail_deltas(pid))
-
-        self._tail_deltas_cache[node_id] = tail_deltas
-        return tail_deltas
-
-    def get_num_inherited_tokens(self, node_id: str) -> int:
         return sum(
             self.node_states[anc_id].length for anc_id in self._ancestors_cache[node_id]
         )
-
-    def get_position_ids(self, node_id: str, num_tokens: int) -> torch.Tensor:
-        """Get position IDs for a node's own tokens."""
-        offset = self.compute_offset(node_id)
-        return torch.arange(offset, offset + num_tokens, dtype=torch.long)
-
-    def get_ancestor_states(self, node_id: str) -> List[NodeState]:
-        ancestors = self._ancestors_cache[node_id]
-        return [self.node_states[anc_id] for anc_id in ancestors]
 
     def register_completion(
         self, node_id: str, num_tokens: int, request_id: str

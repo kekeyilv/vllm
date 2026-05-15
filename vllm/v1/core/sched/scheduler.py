@@ -641,7 +641,7 @@ class Scheduler(SchedulerInterface):
                                 )
                             )
                         num_new_local_computed_tokens = (
-                            request.dag_context.num_inherited_tokens
+                            request.dag_context.position_offset
                         )
 
                     # Get externally-cached tokens if using a KVConnector.

@@ -15,6 +15,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
 )
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import next_power_of_2
@@ -86,6 +87,10 @@ class TritonAttentionMetadata:
     prefix_scheduler_metadata: torch.Tensor | None = None
     mm_prefix_range: dict[int, list[tuple[int, int]]] | None = None
     mm_prefix_range_tensor: torch.Tensor | None = None
+
+    correction_deltas: torch.Tensor | None = None
+    cos_cache: torch.Tensor | None = None
+    sin_cache: torch.Tensor | None = None
 
     @staticmethod
     def compute_mm_prefix_range_tensor(
@@ -223,6 +228,10 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
 
+        correction_deltas = common_attn_metadata.correction_deltas
+        cos_cache = common_attn_metadata.cos_cache
+        sin_cache = common_attn_metadata.sin_cache
+
         use_cascade = common_prefix_len > 0
 
         if use_cascade:
@@ -259,6 +268,9 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             softmax_segm_output=self.softmax_segm_output,
             softmax_segm_max=self.softmax_segm_max,
             softmax_segm_expsum=self.softmax_segm_expsum,
+            correction_deltas=correction_deltas,
+            cos_cache=cos_cache,
+            sin_cache=sin_cache,
         )
         return attn_metadata
 
@@ -581,9 +593,9 @@ class TritonAttentionImpl(AttentionImpl):
                 if key_cache.dtype != self.fp8_dtype:
                     key_cache = key_cache.view(self.fp8_dtype)
                     value_cache = value_cache.view(self.fp8_dtype)
-                assert layer._q_scale_float == 1.0, (
-                    "A non 1.0 q_scale is not currently supported."
-                )
+                assert (
+                    layer._q_scale_float == 1.0
+                ), "A non 1.0 q_scale is not currently supported."
             descale_shape = (
                 attn_metadata.query_start_loc.shape[0] - 1,
                 key_cache.shape[2],
@@ -606,6 +618,9 @@ class TritonAttentionImpl(AttentionImpl):
         softmax_segm_expsum = attn_metadata.softmax_segm_expsum
 
         mm_prefix_range_tensor = attn_metadata.mm_prefix_range_tensor
+        correction_deltas = attn_metadata.correction_deltas
+        cos_cache = attn_metadata.cos_cache
+        sin_cache = attn_metadata.sin_cache
 
         unified_attention(
             q=query[:num_actual_tokens],
@@ -638,6 +653,9 @@ class TritonAttentionImpl(AttentionImpl):
             k_scale_cache=k_scale_cache,
             v_scale_cache=v_scale_cache,
             chunk_lookback=self.chunk_lookback,
+            correction_deltas=correction_deltas,
+            cos_cache=cos_cache,
+            sin_cache=sin_cache,
         )
 
         return output

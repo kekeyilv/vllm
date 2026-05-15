@@ -403,6 +403,9 @@ class CommonAttentionMetadata:
     decode rows (assumes every draft was accepted). Not safe for kernels
     that need exact per-row context lengths on decode rows."""
 
+    correction_deltas: torch.Tensor | None = None
+    cos_cache: torch.Tensor | None = None
+    sin_cache: torch.Tensor | None = None
     # WARNING: Deprecated fields. Will be removed in a future release (v0.15.0)
     _seq_lens_cpu: torch.Tensor | None = None
     _num_computed_tokens_cpu: torch.Tensor | None = None
