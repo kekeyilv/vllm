@@ -27,8 +27,9 @@ class AncestorState:
     """
 
     request_id: str
-    length: int # number of tokens
-    position_delta: int # ancestor position correction delta
+    offset: int
+    length: int  # number of tokens
+    position_delta: int  # ancestor position correction delta
 
 
 @dataclass
@@ -77,9 +78,11 @@ class DAGSession:
         states = []
         current_pos = 0
         for anc_id in ancestors:
+            print(node_id, anc_id, self.node_states[anc_id])
             node_state = self.node_states[anc_id]
             states.append(
                 AncestorState(
+                    offset=node_state.offset,
                     request_id=node_state.request_id,
                     length=node_state.length,
                     position_delta=current_pos - node_state.offset,
@@ -88,9 +91,7 @@ class DAGSession:
             current_pos += node_state.length
 
         return DAGContext(
-            node_id=node_id,
-            position_offset=current_pos,
-            ancestor_states=states
+            node_id=node_id, position_offset=current_pos, ancestor_states=states
         )
 
     def compute_offset(self, node_id: str) -> int:

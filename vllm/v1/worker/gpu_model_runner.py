@@ -704,7 +704,17 @@ class GPUModelRunner(
         )
 
         # For position correction
-        rope = get_rope(self.model_config.get_head_size(), self.max_model_len)
+        hf_config = self.model_config.hf_config
+        rope = get_rope(
+            self.model_config.get_head_size(),
+            self.max_model_len,
+            rope_parameters=hf_config.rope_parameters,
+            dual_chunk_attention_config=(
+                hf_config.dual_chunk_attention_config
+                if hasattr(hf_config, "dual_chunk_attention_config ")
+                else None
+            ),
+        )
         self.cos_sin_cache = rope.cos_sin_cache.to(
             dtype=torch.float, device=self.device
         )
@@ -1838,6 +1848,7 @@ class GPUModelRunner(
                     [state.position_delta for state in dag_context.ancestor_states],
                     num_blocks,
                 )
+                print(self.correction_deltas.np[req_idx, : sum(num_blocks)])
         self.correction_deltas.copy_to_gpu()
 
         # Calculate M-RoPE positions.

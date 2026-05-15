@@ -618,10 +618,9 @@ class LLMEngine:
                     if out.finished:
                         node_output = out
                         break
-        assert node_output.prompt_token_ids
         session.register_completion(
             nodeid,
-            len(node_output.prompt_token_ids) + len(node_output.outputs[0].token_ids),
+            len(prompt_token_ids) + len(node_output.outputs[0].token_ids),
             internal_req_id,
         )
         ttft_ms = (

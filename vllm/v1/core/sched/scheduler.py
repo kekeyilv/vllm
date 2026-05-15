@@ -52,7 +52,7 @@ from vllm.v1.core.sched.request_queue import (
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, cdiv
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
@@ -626,9 +626,22 @@ class Scheduler(SchedulerInterface):
                         )
                         for anc_state in request.dag_context.ancestor_states:
                             req_id = anc_state.request_id
-                            num_valid_blocks = (
-                                anc_state.length + self.block_size - 1
-                            ) // self.block_size
+                            num_block_start = cdiv(anc_state.offset, self.block_size)
+                            num_valid_blocks = cdiv(anc_state.length, self.block_size)
+                            print(
+                                req_id,
+                                num_block_start,
+                                num_valid_blocks,
+                                len(
+                                    list(
+                                        itertools.chain.from_iterable(
+                                            self.kv_cache_manager.get_blocks(
+                                                req_id
+                                            ).get_block_ids()
+                                        )
+                                    )
+                                ),
+                            )
                             new_computed_blocks += (
                                 self.kv_cache_manager.build_kv_blocks_from_ids(
                                     list(
@@ -637,7 +650,7 @@ class Scheduler(SchedulerInterface):
                                                 req_id
                                             ).get_block_ids()
                                         )
-                                    )[:num_valid_blocks]
+                                    )[num_block_start : ]
                                 )
                             )
                         num_new_local_computed_tokens = (

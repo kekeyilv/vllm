@@ -135,6 +135,7 @@ def kernel_unified_attention_2d(
     num_query_heads: tl.constexpr,  # int
     num_queries_per_kv: tl.constexpr,  # int
     block_table_stride: tl.int64,  # int
+    delta_stride: tl.int64,  # int
     query_stride_0: tl.int64,  # int
     query_stride_1: tl.int64,  # int, should be equal to head_size
     output_stride_0: tl.int64,  # int
@@ -242,6 +243,7 @@ def kernel_unified_attention_2d(
     )
 
     block_table_offset = seq_idx * block_table_stride
+    delta_offset = seq_idx * delta_stride
 
     if not USE_SINKS:
         M = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
@@ -348,14 +350,14 @@ def kernel_unified_attention_2d(
         # delta==0 → cos=1, sin=0 → identity (correct for unshifted blocks).
 
         # delta: (TILE_SIZE,) — same index scheme as block_tables_ptr
-        delta = tl.load(delta_ptr + block_table_offset + seq_offset // BLOCK_SIZE).to(
+        delta = tl.load(delta_ptr + delta_offset + seq_offset // BLOCK_SIZE).to(
             tl.int64
         )
 
         # cos/sin: (HALF_HEAD, TILE_SIZE)
         rope_off = offs_hh[:, None] + delta[None, :] * cos_sin_stride
-        cos_t = tl.load(cos_cache_ptr + rope_off, mask=tile_mask[None, :], other=1.0)
-        sin_t = tl.load(sin_cache_ptr + rope_off, mask=tile_mask[None, :], other=0.0)
+        cos_t = tl.load(cos_cache_ptr + rope_off, mask=dim_mask_h[:, None] & tile_mask[None, :], other=1.0)
+        sin_t = tl.load(sin_cache_ptr + rope_off, mask=dim_mask_h[:, None] & tile_mask[None, :], other=0.0)
 
         k_r_offset = (
             physical_block_idx[None, :] * stride_k_cache_0
@@ -1257,6 +1259,7 @@ def unified_attention(
             num_query_heads=num_query_heads,
             num_queries_per_kv=num_queries_per_kv,
             block_table_stride=block_table.stride(0),
+            delta_stride=correction_deltas.stride(0),
             query_stride_0=q.stride(0),
             query_stride_1=q.stride(1),
             output_stride_0=out.stride(0),
