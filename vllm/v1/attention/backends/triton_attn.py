@@ -89,6 +89,7 @@ class TritonAttentionMetadata:
     mm_prefix_range_tensor: torch.Tensor | None = None
 
     correction_deltas: torch.Tensor | None = None
+    block_padding: torch.Tensor | None = None
     cos_cache: torch.Tensor | None = None
     sin_cache: torch.Tensor | None = None
 
@@ -229,6 +230,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         slot_mapping = common_attn_metadata.slot_mapping
 
         correction_deltas = common_attn_metadata.correction_deltas
+        block_padding = common_attn_metadata.block_padding
         cos_cache = common_attn_metadata.cos_cache
         sin_cache = common_attn_metadata.sin_cache
 
@@ -269,6 +271,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             softmax_segm_max=self.softmax_segm_max,
             softmax_segm_expsum=self.softmax_segm_expsum,
             correction_deltas=correction_deltas,
+            block_padding=block_padding,
             cos_cache=cos_cache,
             sin_cache=sin_cache,
         )
@@ -619,6 +622,7 @@ class TritonAttentionImpl(AttentionImpl):
 
         mm_prefix_range_tensor = attn_metadata.mm_prefix_range_tensor
         correction_deltas = attn_metadata.correction_deltas
+        block_padding = attn_metadata.block_padding
         cos_cache = attn_metadata.cos_cache
         sin_cache = attn_metadata.sin_cache
 
@@ -654,6 +658,7 @@ class TritonAttentionImpl(AttentionImpl):
             v_scale_cache=v_scale_cache,
             chunk_lookback=self.chunk_lookback,
             correction_deltas=correction_deltas,
+            block_padding=block_padding,
             cos_cache=cos_cache,
             sin_cache=sin_cache,
         )

@@ -125,6 +125,7 @@ def kernel_unified_attention_2d(
     alibi_slopes_ptr,  # [num_query_heads]
     qq_bias_ptr,  # [num_query_tokens, num_query_tokens]
     delta_ptr,  # [num_seqs, max_num_blocks_per_seq]
+    block_padding_ptr,  # [num_seqs, max_num_blocks_per_seq]
     cos_cache_ptr,  # [max_pos, head_size // 2]
     sin_cache_ptr,  # [max_pos, head_size // 2]
     scale,  # float32
@@ -356,8 +357,16 @@ def kernel_unified_attention_2d(
 
         # cos/sin: (HALF_HEAD, TILE_SIZE)
         rope_off = offs_hh[:, None] + delta[None, :] * cos_sin_stride
-        cos_t = tl.load(cos_cache_ptr + rope_off, mask=dim_mask_h[:, None] & tile_mask[None, :], other=1.0)
-        sin_t = tl.load(sin_cache_ptr + rope_off, mask=dim_mask_h[:, None] & tile_mask[None, :], other=0.0)
+        cos_t = tl.load(
+            cos_cache_ptr + rope_off,
+            mask=dim_mask_h[:, None] & tile_mask[None, :],
+            other=1.0,
+        )
+        sin_t = tl.load(
+            sin_cache_ptr + rope_off,
+            mask=dim_mask_h[:, None] & tile_mask[None, :],
+            other=0.0,
+        )
 
         k_r_offset = (
             physical_block_idx[None, :] * stride_k_cache_0
@@ -375,10 +384,14 @@ def kernel_unified_attention_2d(
 
         # k_r, k_i : (HEAD_SIZE // 2, TILE_SIZE)
         k_r_load = tl.load(
-            key_cache_ptr + k_r_offset, mask=dim_mask_h[:, None] & tile_mask[None, :], other=0.0
+            key_cache_ptr + k_r_offset,
+            mask=dim_mask_h[:, None] & tile_mask[None, :],
+            other=0.0,
         )
         k_i_load = tl.load(
-            key_cache_ptr + k_i_offset, mask=dim_mask_h[:, None] & tile_mask[None, :], other=0.0
+            key_cache_ptr + k_i_offset,
+            mask=dim_mask_h[:, None] & tile_mask[None, :],
+            other=0.0,
         )
         k_r, k_token_head_scales = _prepare_kv_tile(
             k_r_load,
@@ -437,9 +450,15 @@ def kernel_unified_attention_2d(
             KV_QUANT_MODE,
         )
 
+        # padding: (TILE_SIZE,)
+        padding = tl.load(block_padding_ptr + block_table_offset + seq_offset // BLOCK_SIZE).to(
+            tl.int16
+        )
+
         # Compute attention mask: causal by default (key <= query)
         query_abs_pos = context_len + query_pos[:, None]
         seq_mask = seq_offset[None, :] <= query_abs_pos
+        seq_mask = seq_mask & (seq_offset % BLOCK_SIZE < BLOCK_SIZE - padding)
 
         # Apply sliding window / chunked attention to base mask
         # BEFORE mm_prefix OR.
@@ -1147,6 +1166,7 @@ def unified_attention(
     # Chunked attention: restrict attention to aligned blocks with lookback.
     chunk_lookback=-1,
     correction_deltas=None,
+    block_padding=None,
     cos_cache=None,
     sin_cache=None,
 ):
@@ -1249,6 +1269,7 @@ def unified_attention(
             alibi_slopes_ptr=alibi_slopes,
             qq_bias_ptr=qq_bias,
             delta_ptr=correction_deltas,
+            block_padding_ptr=block_padding,
             cos_cache_ptr=cos_cache,
             sin_cache_ptr=sin_cache,
             scale=softmax_scale,

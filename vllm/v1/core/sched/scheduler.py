@@ -626,22 +626,9 @@ class Scheduler(SchedulerInterface):
                         )
                         for anc_state in request.dag_context.ancestor_states:
                             req_id = anc_state.request_id
-                            num_block_start = cdiv(anc_state.offset, self.block_size)
-                            num_valid_blocks = cdiv(anc_state.length, self.block_size)
-                            print(
-                                req_id,
-                                num_block_start,
-                                num_valid_blocks,
-                                len(
-                                    list(
-                                        itertools.chain.from_iterable(
-                                            self.kv_cache_manager.get_blocks(
-                                                req_id
-                                            ).get_block_ids()
-                                        )
-                                    )
-                                ),
-                            )
+                            num_valid_blocks = (
+                                anc_state.length + anc_state.padding
+                            ) // self.block_size
                             new_computed_blocks += (
                                 self.kv_cache_manager.build_kv_blocks_from_ids(
                                     list(
@@ -650,11 +637,12 @@ class Scheduler(SchedulerInterface):
                                                 req_id
                                             ).get_block_ids()
                                         )
-                                    )[num_block_start : ]
+                                    )[-num_valid_blocks:]
                                 )
                             )
                         num_new_local_computed_tokens = (
                             request.dag_context.position_offset
+                            + request.dag_context.padding_offset
                         )
 
                     # Get externally-cached tokens if using a KVConnector.

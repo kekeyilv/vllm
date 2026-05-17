@@ -725,6 +725,12 @@ class GPUModelRunner(
             self.max_num_reqs, max_num_blocks_per_req, dtype=torch.int64
         )
 
+        # For block alignment mask
+        self.block_padding = self._make_buffer(
+            self.max_num_reqs, max_num_blocks_per_req, dtype=torch.int16
+        )
+        self.position_deltas = self._make_buffer(self.max_num_tokens, dtype=torch.int64)
+
         self.encoder_seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
         if self.dcp_world_size > 1:
             self.dcp_local_seq_lens = self._make_buffer(
@@ -1837,19 +1843,34 @@ class GPUModelRunner(
 
         # Calculate position deltas
         self.correction_deltas.np.fill(0)
+        self.block_padding.np.fill(0)
+        position_deltas_np = np.zeros(num_reqs, dtype=np.int64)
         for req_idx, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
             dag_context = self.requests[req_id].dag_context
             if dag_context is not None:
+                block_size = self.cache_config.block_size
                 num_blocks = [
-                    cdiv(state.length, self.cache_config.block_size)
+                    cdiv(state.length, block_size)
                     for state in dag_context.ancestor_states
                 ]
                 self.correction_deltas.np[req_idx, : sum(num_blocks)] = np.repeat(
                     [state.position_delta for state in dag_context.ancestor_states],
                     num_blocks,
                 )
-                print(self.correction_deltas.np[req_idx, : sum(num_blocks)])
+                position_deltas_np[req_idx] = -dag_context.padding_offset
+                current_pos = 0
+                for state in dag_context.ancestor_states:
+                    current_pos += state.length + state.padding
+                    self.block_padding.np[req_idx, current_pos // block_size - 1] = (
+                        state.padding
+                    )
+                # print(self.correction_deltas.np[req_idx, : sum(num_blocks)])
+        self.position_deltas.np[:total_num_scheduled_tokens] = position_deltas_np[
+            req_indices
+        ]
+        self.position_deltas.copy_to_gpu(total_num_scheduled_tokens)
         self.correction_deltas.copy_to_gpu()
+        self.block_padding.copy_to_gpu()
 
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -2028,6 +2049,7 @@ class GPUModelRunner(
         self.positions[:total_num_scheduled_tokens] = (
             self.num_computed_tokens[req_indices_gpu].to(torch.int64)
             + self.query_pos.gpu[:total_num_scheduled_tokens]
+            + self.position_deltas.gpu[:total_num_scheduled_tokens]
         )
         self.seq_lens[:num_reqs] = (
             self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
@@ -2037,7 +2059,8 @@ class GPUModelRunner(
         self.input_batch.block_table.compute_slot_mapping(
             num_reqs,
             self.query_start_loc.gpu[: num_reqs + 1],
-            self.positions[:total_num_scheduled_tokens],
+            self.positions[:total_num_scheduled_tokens]
+            - self.position_deltas.gpu[:total_num_scheduled_tokens],
         )
 
         # Copy the tensors to the GPU.
@@ -2227,6 +2250,7 @@ class GPUModelRunner(
             causal=True,
             is_prefilling=is_prefilling,
             correction_deltas=self.correction_deltas.gpu[:num_reqs],
+            block_padding=self.block_padding.gpu[:num_reqs],
             cos_cache=cos_cache,
             sin_cache=sin_cache,
         )

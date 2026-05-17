@@ -1004,15 +1004,9 @@ class LLM:
 
         session = DAGSession(dag, sys_prompt, next(self.dag_session_counter))
         results: dict[str, RequestOutput] = {}
-        prompts: dict[str, list[int]] = {}
         per_node_ttft_ms: dict[str, float] = {}
 
         for index, node_id in enumerate(dag.topo_sort()):
-            anc_prompt = list(
-                itertools.chain.from_iterable(
-                    prompts[anc_id] for anc_id in dag.ancestors(node_id)
-                )
-            )
             conversation: list[ChatCompletionMessageParam] = []
             prompt = session.dag.get_node(node_id).prompt
             if isinstance(prompt, str):
@@ -1027,7 +1021,6 @@ class LLM:
 
             result, ttft = self.llm_engine.run_dag_request(
                 prompt=self._preprocess_chat_one(conversation),
-                anc_prompt=anc_prompt,
                 nodeid=node_id,
                 session=session,
                 sampling_params=(
@@ -1037,9 +1030,6 @@ class LLM:
                 ),
             )
             
-            prompts[node_id] = (
-                result.prompt_token_ids if result.prompt_token_ids else []
-            ) + list(result.outputs[0].token_ids)
             results[node_id] = result
             per_node_ttft_ms[node_id] = ttft
         if return_timing:

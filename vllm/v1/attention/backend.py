@@ -404,6 +404,7 @@ class CommonAttentionMetadata:
     that need exact per-row context lengths on decode rows."""
 
     correction_deltas: torch.Tensor | None = None
+    block_padding: torch.Tensor | None = None
     cos_cache: torch.Tensor | None = None
     sin_cache: torch.Tensor | None = None
     # WARNING: Deprecated fields. Will be removed in a future release (v0.15.0)
