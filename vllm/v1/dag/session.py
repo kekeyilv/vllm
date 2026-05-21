@@ -16,10 +16,11 @@ class NodeState:
 
     completed: bool = False
     padding: int = 0  # Number of padding tokens for block aligmnet
-    offset: int = 0  # RoPE position offset (first token position)
+    position_offset: int = 0  # RoPE position offset (first token position)
+    padding_offset: int = 0  # Total padding for block alignment
     length: int = 0  # Number of tokens in this node
     request_id: str = ""
-    data: List[int] = field(default_factory=list) # prompt + output + padding
+    data: List[int] = field(default_factory=list)  # prompt + output + padding
 
 
 @dataclass
@@ -30,7 +31,8 @@ class AncestorState:
 
     node_id: str
     request_id: str
-    offset: int
+    position_offset: int
+    padding_offset: int
     padding: int
     length: int  # number of tokens
     position_delta: int  # ancestor position correction delta
@@ -89,11 +91,12 @@ class DAGSession:
             states.append(
                 AncestorState(
                     node_id=anc_id,
-                    offset=node_state.offset,
+                    position_offset=node_state.position_offset,
+                    padding_offset=node_state.padding_offset,
                     request_id=node_state.request_id,
                     length=node_state.length,
                     padding=node_state.padding,
-                    position_delta=current_pos - node_state.offset,
+                    position_delta=current_pos - node_state.position_offset,
                 )
             )
             current_pos += node_state.length
@@ -104,15 +107,6 @@ class DAGSession:
             position_offset=current_pos,
             ancestor_states=states,
             padding_offset=padding_offset,
-        )
-
-    def compute_offset(self, node_id: str) -> int:
-        """Compute RoPE position offset for a node based on DAG topology.
-
-        Parallel branches share the same starting offset.
-        """
-        return sum(
-            self.node_states[anc_id].length for anc_id in self._ancestors_cache[node_id]
         )
 
     def register_completion(
@@ -126,8 +120,10 @@ class DAGSession:
         """Register a completed node's state for use by downstream nodes."""
         length = len(prompt_tokens) + len(output_tokens)
         padding = (block_size - length % block_size) % block_size
+        context = self.get_context(node_id)
         self.node_states[node_id] = NodeState(
-            offset=self.compute_offset(node_id),
+            position_offset=context.position_offset,
+            padding_offset=context.padding_offset,
             length=length,
             completed=True,
             request_id=request_id,

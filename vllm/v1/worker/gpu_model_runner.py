@@ -1864,7 +1864,6 @@ class GPUModelRunner(
                     self.block_padding.np[req_idx, current_pos // block_size - 1] = (
                         state.padding
                     )
-                # print(self.correction_deltas.np[req_idx, : sum(num_blocks)])
         self.position_deltas.np[:total_num_scheduled_tokens] = position_deltas_np[
             req_indices
         ]

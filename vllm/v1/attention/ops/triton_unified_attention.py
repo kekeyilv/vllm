@@ -451,14 +451,13 @@ def kernel_unified_attention_2d(
         )
 
         # padding: (TILE_SIZE,)
-        padding = tl.load(block_padding_ptr + block_table_offset + seq_offset // BLOCK_SIZE).to(
-            tl.int16
-        )
+        padding = tl.load(
+            block_padding_ptr + block_table_offset + seq_offset // BLOCK_SIZE
+        ).to(tl.int16)
 
         # Compute attention mask: causal by default (key <= query)
         query_abs_pos = context_len + query_pos[:, None]
         seq_mask = seq_offset[None, :] <= query_abs_pos
-        seq_mask = seq_mask & (seq_offset % BLOCK_SIZE < BLOCK_SIZE - padding)
 
         # Apply sliding window / chunked attention to base mask
         # BEFORE mm_prefix OR.
@@ -498,6 +497,8 @@ def kernel_unified_attention_2d(
                     & is_valid
                 )
                 seq_mask |= q_in_range & k_in_range
+        
+        seq_mask = seq_mask & (seq_offset % BLOCK_SIZE < BLOCK_SIZE - padding)
 
         # S : (BLOCK_M, TILE_SIZE)
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)

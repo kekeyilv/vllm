@@ -332,13 +332,17 @@ class LLMEngine:
         prompt_token_ids = self.input_processor.process_inputs(
             req_id, prompt, sampling_params, supported_tasks=self.get_supported_tasks()
         ).prompt_token_ids
+        assert prompt_token_ids
+        # if len(context.ancestor_states) != 0:
+            # Trunctate the starting prompt of non-root node to guarantee correctness
+        prompt_token_ids = prompt_token_ids[1:]
+
         anc_prompt = list(
             itertools.chain.from_iterable(
                 session.node_states[anc.node_id].data for anc in context.ancestor_states
             )
         )
 
-        assert prompt_token_ids
         internal_req_id = self.add_dag_request(
             anc_prompt + prompt_token_ids,
             req_id,
@@ -368,7 +372,9 @@ class LLMEngine:
             request_id=internal_req_id,
             block_size=self.vllm_config.cache_config.block_size,
             prompt_tokens=prompt_token_ids,
-            output_tokens=list(node_output.outputs[0].token_ids),
+            output_tokens=list(node_output.outputs[0].token_ids)[
+                :-1
+            ],  # The last token must be truncated or it will include the confusing ending token
         )
         ttft_ms = (
             (first_token_time - t_submit) * 1000.0

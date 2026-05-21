@@ -626,6 +626,9 @@ class Scheduler(SchedulerInterface):
                         )
                         for anc_state in request.dag_context.ancestor_states:
                             req_id = anc_state.request_id
+                            block_start = (
+                                anc_state.position_offset + anc_state.padding_offset
+                            ) // self.block_size
                             num_valid_blocks = (
                                 anc_state.length + anc_state.padding
                             ) // self.block_size
@@ -637,7 +640,7 @@ class Scheduler(SchedulerInterface):
                                                 req_id
                                             ).get_block_ids()
                                         )
-                                    )[-num_valid_blocks:]
+                                    )[block_start : block_start + num_valid_blocks]
                                 )
                             )
                         num_new_local_computed_tokens = (
